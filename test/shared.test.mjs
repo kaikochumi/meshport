@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "../chrome-extension/shared.js";
 
-const { isTripoGlbUrl, tripoFileStem, tripoLibraryProject } = globalThis;
+const { isTripoGlbUrl, tripoFileStem, tripoLibraryProject, tripoProjectIdFromUrl } = globalThis;
 
 const MODEL = "https://tripo-data.rg1.data.tripo3d.com/2026/11/15/tripo-studio/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.glb";
 
@@ -30,6 +30,24 @@ test("tripoFileStem returns the model id", () => {
     tripoFileStem("https://tripo-data.rg1.data.tripo3d.com/a/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.glb"),
     "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d",
   );
+});
+
+test("tripoProjectIdFromUrl reads the workspace route", () => {
+  assert.equal(
+    tripoProjectIdFromUrl("https://studio.tripo3d.ai/workspace/generate/ad7cfcb4-92d8-4be0-a90f-2f8d64afa111?tab=model"),
+    "ad7cfcb4-92d8-4be0-a90f-2f8d64afa111",
+  );
+  assert.equal(
+    tripoProjectIdFromUrl("https://studio.tripo3d.ai/workspace/generate/ad7cfcb4-92d8-4be0-a90f-2f8d64afa111/"),
+    "ad7cfcb4-92d8-4be0-a90f-2f8d64afa111",
+  );
+});
+
+test("tripoProjectIdFromUrl ignores other pages", () => {
+  assert.equal(tripoProjectIdFromUrl("https://studio.tripo3d.ai/workspace"), "");
+  assert.equal(tripoProjectIdFromUrl("https://studio.tripo3d.ai/workspace/generate"), "");
+  assert.equal(tripoProjectIdFromUrl("not a url"), "");
+  assert.equal(tripoProjectIdFromUrl(null), "");
 });
 
 test("tripoLibraryProject reads the name, best cover and timestamp", () => {

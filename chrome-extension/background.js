@@ -17,24 +17,28 @@ function pruneRecent(list) {
   return list.filter((entry) => entry?.url && (entry.capturedAt || 0) >= cutoff);
 }
 
-function rememberRecent(url) {
+function rememberRecent(url, projectId = "") {
   if (!isTripoGlbUrl(url)) return;
   const index = recentModels.findIndex((entry) => entry.url === url);
   if (index >= 0) recentModels.splice(index, 1);
-  recentModels.unshift({ url, capturedAt: Date.now() });
+  recentModels.unshift({ url, capturedAt: Date.now(), projectId });
   while (recentModels.length > RECENT_LIMIT) recentModels.pop();
   chrome.storage.session.set({ [RECENT_KEY]: recentModels }).catch(() => {});
 }
 
-function remember(tabId, url) {
+function remember(tabId, url, projectId = "") {
   if (!isTripoGlbUrl(url)) return;
-  rememberRecent(url);
+  rememberRecent(url, projectId);
   if (tabId < 0) return;
 
   const entries = tabTripoRequests.get(tabId) || [];
-  if (entries.some((entry) => entry.url === url)) return;
+  const existing = entries.find((entry) => entry.url === url);
+  if (existing) {
+    if (!existing.projectId && projectId) existing.projectId = projectId;
+    return;
+  }
 
-  entries.unshift({ url, capturedAt: Date.now() });
+  entries.unshift({ url, capturedAt: Date.now(), projectId });
   const trimmed = entries.slice(0, MAX_ENTRIES);
   tabTripoRequests.set(tabId, trimmed);
   chrome.storage.session.set({ [storageKey(tabId)]: trimmed }).catch(() => {});
@@ -82,7 +86,11 @@ chrome.webRequest.onBeforeRequest.addListener(
       if (details.tabId >= 0) forget(details.tabId);
       return;
     }
-    remember(details.tabId, details.url);
+    remember(
+      details.tabId,
+      details.url,
+      tripoProjectIdFromUrl(details.documentUrl || details.initiator),
+    );
   },
   { urls: [
     "*://tripo3d.ai/*",
@@ -98,7 +106,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "remember-tripo-url" && sender.tab?.id !== undefined) {
-    remember(sender.tab.id, message.url);
+    remember(
+      sender.tab.id,
+      message.url,
+      message.projectId || tripoProjectIdFromUrl(sender.tab.url),
+    );
     sendResponse({ ok: true });
     return;
   }

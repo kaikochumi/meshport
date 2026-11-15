@@ -61,6 +61,8 @@ const THUMB_LIMIT = 24;
 const LIBRARY_KEY = "meshport/library/v1";
 const MODEL_LINK_KEY = "meshport/model-links/v1";
 const MODEL_LINK_TTL = 4 * 60 * 1000;
+const CAPTURE_OPEN_TIMEOUT = 45000;
+const CAPTURE_POLL_MS = 700;
 
 let jobId = 0;
 let busy = false;
@@ -75,6 +77,7 @@ let settings = loadSettings();
 let thumbnailQueue = Promise.resolve();
 let thumbnailObserver = null;
 let currentModelEntries = [];
+let capturedModels = [];
 let idleWaiters = [];
 let scanToken = 0;
 
@@ -199,7 +202,9 @@ async function generateThumbnail(entry, card, token, key) {
   if (token !== scanToken || !card.isConnected) return;
 
   try {
-    if (!entry.url) await resolveLibraryEntry(entry);
+    const captured = capturedLinkFor(entry.projectId);
+    if (captured) entry.url = captured;
+    else if (!entry.url) await resolveLibraryEntry(entry);
     const buffer = await fetchArrayBuffer(entry.url);
     if (token !== scanToken || !card.isConnected) return;
     const response = await askSandbox({ type: "thumbnail", key: entry.url, buffer }, 30000);
@@ -487,6 +492,53 @@ function saveModelLinks(links) {
     if (entry?.url && now - (entry.at || 0) < MODEL_LINK_TTL) trimmed[id] = entry;
   }
   writeStoredJson(MODEL_LINK_KEY, trimmed);
+}
+
+async function refreshCapturedModels(tabId) {
+  const response = await chrome.runtime.sendMessage({
+    type: "get-tripo-requests",
+    tabId: Number.isInteger(tabId) ? tabId : -1,
+  }).catch(() => null);
+  const cutoff = Date.now() - MODEL_LINK_TTL;
+  capturedModels = [...(response?.entries || []), ...(response?.recent || [])]
+    .filter((entry) => entry?.url && (entry.capturedAt || 0) >= cutoff);
+  return capturedModels;
+}
+
+function capturedLinkFor(projectId) {
+  if (!projectId) return "";
+  const cutoff = Date.now() - MODEL_LINK_TTL;
+  const match = capturedModels
+    .filter((entry) => entry.projectId === projectId && (entry.capturedAt || 0) >= cutoff)
+    .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
+  return match?.url || "";
+}
+
+async function openProjectAndCapture(projectId) {
+  if (!projectId) throw new Error("This model has no Tripo project id.");
+  const link = `https://studio.tripo3d.ai/workspace/generate/${encodeURIComponent(projectId)}`;
+  setStatus("Opening the model in Tripo to read its GLB...", "busy");
+
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: link, active: false });
+  } catch {
+    throw new Error("Could not open the model in Tripo. Check that the Tripo tab is still open.");
+  }
+
+  const deadline = Date.now() + CAPTURE_OPEN_TIMEOUT;
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
+      await refreshCapturedModels(tab.id);
+      const url = capturedLinkFor(projectId);
+      if (url) return url;
+    }
+  } finally {
+    if (tab?.id) chrome.tabs.remove(tab.id).catch(() => {});
+  }
+
+  throw new Error("Tripo opened this model without loading a GLB. Open the model in Tripo and try again.");
 }
 
 async function getLibraryFromTab() {
@@ -837,84 +889,97 @@ function isExpiredLinkError(error) {
   return /expired|\b403\b/i.test(error?.message || "");
 }
 
-function rememberModelLink(entry, url) {
+function rememberModelLink(entry, url, at = Date.now()) {
   if (!entry?.projectId) return;
   const links = loadModelLinks();
   links[entry.projectId] = {
     url,
-    at: entry.resolvedAt,
+    at,
     name: entry.name || "",
   };
   saveModelLinks(links);
 }
 
-async function downloadEntry(entry) {
-  if (!entry.url) {
-    setStatus("Asking Tripo for the model...", "busy");
-    await resolveLibraryEntry(entry);
-  }
-  return new Uint8Array(await fetchArrayBuffer(entry.url));
-}
-
-async function exportEntryGlb(entry, kind) {
-  const stored = kind === "fbx" ? "an FBX file" : "a format Meshport cannot read";
-  setStatus(`Tripo keeps this model as ${stored}. Asking Tripo for a GLB...`, "busy");
-
-  const tab = await getTripoTab();
-  let response;
-  try {
-    response = await chrome.tabs.sendMessage(tab.id, {
-      type: "export-tripo-project",
-      projectId: entry.projectId,
-    });
-  } catch {
-    throw new Error("Reload the Tripo tab so Meshport can ask Tripo for a GLB.");
-  }
-  if (!response?.ok) {
-    throw new Error(response?.error || "Tripo did not export this model as GLB.");
-  }
-
-  const bytes = new Uint8Array(await fetchArrayBuffer(response.url));
-  const exported = meshportModelKind(bytes);
-  let glb = null;
-  if (exported === "glb") glb = bytes;
-  else if (exported === "zip") glb = await meshportGlbFromZip(bytes.buffer);
-  if (!glb) throw new Error("Tripo exported this model without a GLB.");
-
-  entry.url = response.url;
-  entry.resolvedAt = Date.now();
-  rememberModelLink(entry, response.url);
-  return glb;
-}
-
-async function fetchSelectedBuffer() {
-  const entry = selectedEntry;
-  if (!entry) throw new Error("No Tripo model selected.");
-
-  let bytes;
-  try {
-    bytes = await downloadEntry(entry);
-  } catch (error) {
-    if (!entry.projectId || !isExpiredLinkError(error)) throw error;
-    setStatus("Refreshing the Tripo link...", "busy");
-    await resolveLibraryEntry(entry, true);
-    bytes = await downloadEntry(entry);
-  }
-
+async function glbFromBytes(bytes) {
   const kind = meshportModelKind(bytes);
   if (kind === "glb") return bytes.buffer;
   if (kind === "zip") {
     const glb = await meshportGlbFromZip(bytes.buffer);
     if (glb) return glb.buffer;
   }
+  return null;
+}
+
+async function fetchGlbFromUrl(url) {
+  return glbFromBytes(new Uint8Array(await fetchArrayBuffer(url)));
+}
+
+async function fetchSelectedBuffer() {
+  const entry = selectedEntry;
+  if (!entry) throw new Error("No Tripo model selected.");
+
+  await refreshCapturedModels();
+  const candidates = [];
+  let lastError = null;
+  const add = (url) => {
+    if (url && !candidates.includes(url)) candidates.push(url);
+  };
+
+  if (entry.url) add(entry.url);
+  add(capturedLinkFor(entry.projectId));
+
   if (entry.projectId) {
-    return (await exportEntryGlb(entry, kind)).buffer;
+    try {
+      add(await resolveLibraryEntry(entry));
+    } catch {
+      // A captured page link or the viewer fallback can still work.
+    }
   }
-  throw new Error(
-    kind === "fbx"
-      ? "This model is an FBX file. Open it in Tripo and export it as GLB."
-      : "This download is not a GLB file.",
-  );
+
+  for (const url of [...candidates]) {
+    setStatus("Downloading Tripo GLB...", "busy");
+    try {
+      const glb = await fetchGlbFromUrl(url);
+      if (glb) {
+        entry.url = url;
+        entry.resolvedAt = Date.now();
+        rememberModelLink(entry, url, entry.resolvedAt);
+        return glb;
+      }
+    } catch (error) {
+      lastError = error;
+      if (!entry.projectId || !isExpiredLinkError(error)) continue;
+      try {
+        setStatus("Refreshing the Tripo link...", "busy");
+        const refreshed = await resolveLibraryEntry(entry, true);
+        const glb = await fetchGlbFromUrl(refreshed);
+        if (glb) {
+          entry.resolvedAt = Date.now();
+          rememberModelLink(entry, refreshed, entry.resolvedAt);
+          return glb;
+        }
+      } catch {
+        // Fall through to the next candidate.
+      }
+    }
+  }
+
+  if (!entry.projectId) {
+    throw new Error(
+      isExpiredLinkError(lastError)
+        ? "The Tripo link expired. Open the model in Tripo, then scan again."
+        : "This model is not a GLB file.",
+    );
+  }
+
+  setStatus("Tripo keeps this model in another format. Opening it to read the GLB...", "busy");
+  const captured = await openProjectAndCapture(entry.projectId);
+  const glb = await fetchGlbFromUrl(captured);
+  if (!glb) throw new Error("Tripo loaded this model without a GLB.");
+  entry.url = captured;
+  entry.resolvedAt = Date.now();
+  rememberModelLink(entry, captured, entry.resolvedAt);
+  return glb;
 }
 
 async function runSandboxJob(request, fallbackUrl) {
@@ -1017,6 +1082,7 @@ async function scan() {
     const [linksResult, libraryResult] = await Promise.allSettled([
       getLinksFromActiveTab(),
       getLibraryFromTab(),
+      refreshCapturedModels(),
     ]);
     const links = linksResult.status === "fulfilled" ? linksResult.value : [];
     const projects = libraryResult.status === "fulfilled"

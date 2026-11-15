@@ -157,6 +157,17 @@ async function meshportGlbFromZip(buffer) {
   return zipEntryBytes(bytes, view, model);
 }
 
+function tripoProjectIdFromUrl(value) {
+  if (!value || typeof value !== "string") return "";
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/\/workspace\/generate\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]).slice(0, 128) : "";
+  } catch {
+    return "";
+  }
+}
+
 function tripoLibraryProject(project, scope) {
   const id = project?.id;
   if (!id) return null;
@@ -172,6 +183,7 @@ function tripoLibraryProject(project, scope) {
 
 globalThis.isTripoGlbUrl = isTripoGlbUrl;
 globalThis.tripoFileStem = tripoFileStem;
+globalThis.tripoProjectIdFromUrl = tripoProjectIdFromUrl;
 globalThis.tripoLibraryProject = tripoLibraryProject;
 globalThis.meshportModelKind = meshportModelKind;
 globalThis.meshportGlbFromZip = meshportGlbFromZip;
