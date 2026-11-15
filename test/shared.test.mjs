@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "../chrome-extension/shared.js";
 
-const { isTripoGlbUrl, tripoFileStem } = globalThis;
+const { isTripoGlbUrl, tripoFileStem, tripoLibraryProject } = globalThis;
 
 const MODEL = "https://tripo-data.rg1.data.tripo3d.com/2026/11/15/tripo-studio/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.glb";
 
@@ -31,3 +31,50 @@ test("tripoFileStem returns the model id", () => {
     "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d",
   );
 });
+
+test("tripoLibraryProject reads the name, best cover and timestamp", () => {
+  const card = tripoLibraryProject({
+    id: "ad7cfcb4-92d8-4be0-a90f-2f8d64afa111",
+    project_name: "  Street Van  ",
+    create_time: "2026-11-15T10:00:00Z",
+    cover_image_object: [{
+      sizes: [
+        { width: 128, url: "https://tripo-data.rg1.data.tripo3d.com/cover-small.png" },
+        { width: 512, url: "https://tripo-data.rg1.data.tripo3d.com/cover-large.png" },
+      ],
+    }],
+  }, "collected");
+
+  assert.deepEqual(card, {
+    id: "ad7cfcb4-92d8-4be0-a90f-2f8d64afa111",
+    name: "Street Van",
+    cover: "https://tripo-data.rg1.data.tripo3d.com/cover-large.png",
+    createdAt: "2026-11-15T10:00:00.000Z",
+    scope: "collected",
+  });
+});
+
+test("tripoLibraryProject falls back to the short description and cover_image", () => {
+  const card = tripoLibraryProject({
+    id: "5c1e9a72-8f43-4d61-b2a0-7e9c3f18d644",
+    biz_info: { short_description: "Avocado" },
+    create_time: 1763200000,
+    cover_image: ["https://tripo-data.rg1.data.tripo3d.com/cover.png"],
+  });
+
+  assert.equal(card.name, "Avocado");
+  assert.equal(card.cover, "https://tripo-data.rg1.data.tripo3d.com/cover.png");
+  assert.equal(card.createdAt, new Date(1763200000 * 1000).toISOString());
+  assert.equal(card.scope, "mine");
+});
+
+test("tripoLibraryProject drops unsafe covers and empty projects", () => {
+  assert.equal(tripoLibraryProject({ project_name: "No id" }), null);
+  const card = tripoLibraryProject({
+    id: "9d2c71b3-6e54-4f20-8a19-3c5d7e6f8091",
+    cover_image: ["data:image/png;base64,AAAA", "javascript:alert(1)"],
+  });
+  assert.equal(card.cover, "");
+  assert.equal(card.name, "");
+});
+

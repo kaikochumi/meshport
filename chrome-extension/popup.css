@@ -228,7 +228,7 @@ h2 {
 .models {
   display: grid;
   gap: 5px;
-  max-height: 109px;
+  max-height: 164px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;

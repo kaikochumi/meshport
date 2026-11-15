@@ -58,10 +58,14 @@ const PREFS_KEY = "meshport/preferences";
 const SETTINGS_KEY = "meshport/settings/v1";
 const THUMB_KEY = "meshport/thumbnails/v1";
 const THUMB_LIMIT = 24;
+const LIBRARY_KEY = "meshport/library/v1";
+const MODEL_LINK_KEY = "meshport/model-links/v1";
+const MODEL_LINK_TTL = 4 * 60 * 1000;
 
 let jobId = 0;
 let busy = false;
-let selectedUrl = "";
+let selectedEntry = null;
+let selectionKey = "";
 let inspectedKey = "";
 let previewUrls = [];
 let lastPreviews = [];
@@ -134,8 +138,13 @@ function saveThumbnailCache() {
   }
 }
 
-function thumbnailKey(url) {
-  return tripoFileStem(url) || url;
+function thumbnailKey(entry) {
+  if (entry.projectId) return entry.projectId;
+  return tripoFileStem(entry.url) || entry.url;
+}
+
+function entryKey(entry) {
+  return entry.projectId || entry.url;
 }
 
 function modelLabel(stem) {
@@ -143,6 +152,29 @@ function modelLabel(stem) {
     return `Model ${stem.slice(0, 8)}`;
   }
   return stem;
+}
+
+function entryTitle(entry) {
+  if (entry.name) return entry.name;
+  if (entry.projectId) return `Model ${entry.projectId.slice(0, 8)}`;
+  return modelLabel(tripoFileStem(entry.url) || "tripo-model");
+}
+
+function baseNameFromEntry(entry) {
+  if (entry.name) return sanitizeBaseName(entry.name, "meshport-model");
+  if (entry.projectId) return sanitizeBaseName(`model-${entry.projectId.slice(0, 8)}`);
+  return baseNameFromUrl(entry.url);
+}
+
+function entryMeta(entry) {
+  if (entry.kind === "library") {
+    const scope = entry.scope === "collected" ? "Collected" : "My Assets";
+    if (!entry.capturedAt) return scope;
+    return `${scope} · ${formatAge(Date.now() - entry.capturedAt)}`;
+  }
+  return entry.capturedAt
+    ? `Seen ${formatAge(Date.now() - entry.capturedAt)}`
+    : "Detected in this tab";
 }
 
 function waitForIdle() {
@@ -167,6 +199,7 @@ async function generateThumbnail(entry, card, token, key) {
   if (token !== scanToken || !card.isConnected) return;
 
   try {
+    if (!entry.url) await resolveLibraryEntry(entry);
     const buffer = await fetchArrayBuffer(entry.url);
     if (token !== scanToken || !card.isConnected) return;
     const response = await askSandbox({ type: "thumbnail", key: entry.url, buffer }, 30000);
@@ -188,7 +221,7 @@ function setStatus(text, tone = "idle") {
 }
 
 function updateActionState() {
-  const hasModel = Boolean(selectedUrl);
+  const hasModel = Boolean(selectedEntry);
   inspectButton.disabled = busy || !hasModel;
   convertButton.disabled = busy || !hasModel;
 }
@@ -221,8 +254,8 @@ function baseNameFromUrl(value) {
   return sanitizeBaseName(tripoFileStem(value), "meshport-model");
 }
 
-function currentBaseName(url) {
-  return sanitizeBaseName(baseNameInput.value, baseNameFromUrl(url));
+function currentBaseName(entry) {
+  return sanitizeBaseName(baseNameInput.value, baseNameFromEntry(entry));
 }
 
 function currentFormat() {
@@ -409,6 +442,153 @@ async function getActiveTab() {
   return tab;
 }
 
+function isTripoTab(tab) {
+  return /^https?:\/\/([a-z0-9-]+\.)*tripo3d\.(ai|com)\//i.test(tab?.url || "");
+}
+
+async function getTripoTab() {
+  const active = await getActiveTab();
+  const tabs = await chrome.tabs.query({
+    url: ["*://tripo3d.ai/*", "*://*.tripo3d.ai/*", "*://*.tripo3d.com/*"],
+  });
+  const open = tabs.filter((entry) => entry.id);
+  const studio = open.find((entry) => /^https?:\/\/studio\.tripo3d\.ai\//i.test(entry.url || ""));
+  if (studio) return studio;
+  if (isTripoTab(active)) return active;
+  if (open[0]) return open[0];
+  throw new Error("Open studio.tripo3d.ai in a tab so Meshport can read your library.");
+}
+
+function readStoredJson(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Cache writes are optional.
+  }
+}
+
+function loadModelLinks() {
+  const value = readStoredJson(MODEL_LINK_KEY);
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function saveModelLinks(links) {
+  const now = Date.now();
+  const trimmed = {};
+  for (const [id, entry] of Object.entries(links)) {
+    if (entry?.url && now - (entry.at || 0) < MODEL_LINK_TTL) trimmed[id] = entry;
+  }
+  writeStoredJson(MODEL_LINK_KEY, trimmed);
+}
+
+async function getLibraryFromTab() {
+  const cachedProjects = () => {
+    const cached = readStoredJson(LIBRARY_KEY);
+    return Array.isArray(cached?.projects) ? cached.projects : [];
+  };
+
+  const tab = await getTripoTab();
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tab.id, { type: "get-tripo-library" });
+  } catch {
+    const projects = cachedProjects();
+    if (projects.length) return { projects, cached: true };
+    throw new Error("Reload the Tripo tab so Meshport can read the library.");
+  }
+  if (!response?.ok) {
+    const projects = cachedProjects();
+    if (projects.length) return { projects, cached: true };
+    throw new Error(response?.error || "Could not read the Tripo library.");
+  }
+
+  const projects = Array.isArray(response.projects) ? response.projects : [];
+  writeStoredJson(LIBRARY_KEY, { at: Date.now(), projects });
+  return { projects, cached: false };
+}
+
+async function resolveLibraryEntry(entry, force = false) {
+  if (!entry?.projectId) throw new Error("This model has no Tripo project id.");
+  if (
+    !force
+    && entry.url
+    && Date.now() - (entry.resolvedAt || 0) < MODEL_LINK_TTL
+  ) {
+    return entry.url;
+  }
+
+  const links = loadModelLinks();
+  const cached = links[entry.projectId];
+  if (
+    !force
+    && cached?.url
+    && Date.now() - (cached.at || 0) < MODEL_LINK_TTL
+  ) {
+    entry.url = cached.url;
+    entry.resolvedAt = cached.at;
+    if (!entry.name && cached.name) entry.name = cached.name;
+    return entry.url;
+  }
+
+  const tab = await getTripoTab();
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tab.id, {
+      type: "resolve-tripo-project",
+      projectId: entry.projectId,
+    });
+  } catch {
+    throw new Error("Reload the Tripo tab so Meshport can read the library.");
+  }
+  if (!response?.ok) {
+    throw new Error(response?.error || "Tripo did not return a model link.");
+  }
+
+  entry.url = response.url;
+  entry.resolvedAt = Date.now();
+  if (!entry.name && response.name) entry.name = response.name;
+  links[entry.projectId] = {
+    url: entry.url,
+    at: entry.resolvedAt,
+    name: entry.name || "",
+  };
+  saveModelLinks(links);
+  return entry.url;
+}
+
+function buildEntries(links, projects) {
+  if (!projects.length) {
+    return links.map((link) => ({
+      kind: "captured",
+      url: link.url,
+      capturedAt: link.capturedAt || 0,
+      name: "",
+      cover: "",
+      projectId: "",
+      scope: "tab",
+    }));
+  }
+
+  return projects.map((project) => ({
+    kind: "library",
+    projectId: project.id,
+    url: "",
+    resolvedAt: 0,
+    capturedAt: Date.parse(project.createdAt) || 0,
+    name: project.name || "",
+    cover: project.cover || "",
+    scope: project.scope || "mine",
+  }));
+}
+
 function formatAge(age) {
   if (age < 60_000) return "just now";
   const minutes = Math.floor(age / 60_000);
@@ -457,19 +637,21 @@ async function getLinksFromActiveTab() {
     .slice(0, 50);
 }
 
-function selectModel(url, focus = false) {
-  if (!url) return;
-  const changed = url !== selectedUrl;
-  selectedUrl = url;
+function selectEntry(entry, focus = false) {
+  if (!entry) return;
+  const key = entryKey(entry);
+  const changed = key !== selectionKey;
+  selectedEntry = entry;
+  selectionKey = key;
 
   for (const button of linksList.querySelectorAll(".model")) {
-    const isSelected = button.dataset.url === url;
+    const isSelected = button.dataset.key === key;
     button.setAttribute("aria-selected", String(isSelected));
     button.tabIndex = isSelected ? 0 : -1;
     if (isSelected && focus) button.focus();
   }
 
-  baseNameInput.value = baseNameFromUrl(url);
+  baseNameInput.value = baseNameFromEntry(entry);
   if (changed) {
     inspectedKey = "";
     lastPreviews = [];
@@ -480,9 +662,10 @@ function selectModel(url, focus = false) {
 
 function fillLinks(entries) {
   const token = ++scanToken;
-  entries = entries.filter((entry) => isTripoGlbUrl(entry.url));
+  entries = entries.filter((entry) => entry.url || entry.projectId);
   currentModelEntries = entries;
-  selectedUrl = "";
+  selectedEntry = null;
+  selectionKey = "";
   linksList.replaceChildren();
   modelCount.textContent = String(entries.length);
 
@@ -490,7 +673,7 @@ function fillLinks(entries) {
     const empty = document.createElement("div");
     empty.className = "empty";
     const text = document.createElement("p");
-    text.textContent = "No model captured yet. If the model was already open, reload the tab so Meshport can see it load.";
+    text.textContent = "No model found. Reload the Tripo tab so Meshport can read your library.";
     const reload = document.createElement("button");
     reload.type = "button";
     reload.className = "empty-reload";
@@ -504,18 +687,17 @@ function fillLinks(entries) {
 
   const cards = [];
   entries.forEach((entry, index) => {
+    const key = entryKey(entry);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "model";
-    button.dataset.url = entry.url;
+    button.dataset.key = key;
     button.dataset.index = String(index);
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", "false");
     button.tabIndex = -1;
     button.style.setProperty("--i", String(Math.min(index, 8)));
-
-    const stem = tripoFileStem(entry.url) || "tripo-model";
-    button.title = stem;
+    button.title = entryTitle(entry);
 
     const thumb = document.createElement("span");
     thumb.className = "model-thumb";
@@ -525,12 +707,10 @@ function fillLinks(entries) {
     text.className = "model-text";
     const name = document.createElement("span");
     name.className = "model-name";
-    name.textContent = modelLabel(stem);
+    name.textContent = entryTitle(entry);
     const meta = document.createElement("span");
     meta.className = "model-meta";
-    meta.textContent = entry.capturedAt
-      ? `Seen ${formatAge(Date.now() - entry.capturedAt)}`
-      : "Detected in this tab";
+    meta.textContent = entryMeta(entry);
     text.append(name, meta);
 
     button.append(thumb, text);
@@ -538,7 +718,7 @@ function fillLinks(entries) {
     cards.push(button);
   });
 
-  selectModel(entries[0].url);
+  selectEntry(entries[0]);
   primeThumbnails(entries, cards);
 }
 
@@ -550,7 +730,7 @@ function primeThumbnails(entries, cards) {
       const card = record.target;
       const entry = entries[Number(card.dataset.index)];
       if (!entry) continue;
-      const key = thumbnailKey(entry.url);
+      const key = thumbnailKey(entry);
       const cached = thumbnailCache[key];
       if (cached) {
         setThumbnail(card, cached);
@@ -568,7 +748,17 @@ function primeThumbnails(entries, cards) {
 
   cards.forEach((card) => {
     const entry = entries[Number(card.dataset.index)];
-    const cached = entry ? thumbnailCache[thumbnailKey(entry.url)] : "";
+    if (!entry) return;
+    if (entry.cover) {
+      const image = card.querySelector(".model-thumb img");
+      if (image) {
+        image.referrerPolicy = "no-referrer";
+        image.src = entry.cover;
+        card.classList.add("has-thumb");
+      }
+      return;
+    }
+    const cached = thumbnailCache[thumbnailKey(entry)];
     if (cached) {
       setThumbnail(card, cached);
     } else {
@@ -643,29 +833,51 @@ async function fetchArrayBuffer(url) {
   return response.arrayBuffer();
 }
 
-async function runSandboxJob(request, url) {
+function isExpiredLinkError(error) {
+  return /expired|\b403\b/i.test(error?.message || "");
+}
+
+async function fetchSelectedBuffer() {
+  const entry = selectedEntry;
+  if (!entry) throw new Error("No Tripo model selected.");
+
+  if (!entry.url) {
+    setStatus("Asking Tripo for the model...", "busy");
+    await resolveLibraryEntry(entry);
+  }
+
+  try {
+    return await fetchArrayBuffer(entry.url);
+  } catch (error) {
+    if (!entry.projectId || !isExpiredLinkError(error)) throw error;
+    setStatus("Refreshing the Tripo link...", "busy");
+    await resolveLibraryEntry(entry, true);
+    return fetchArrayBuffer(entry.url);
+  }
+}
+
+async function runSandboxJob(request, fallbackUrl) {
   try {
     return await askSandbox(request);
   } catch (error) {
-    if (!request.buffer && /Decode the file first/i.test(error.message)) {
-      request.buffer = await fetchArrayBuffer(url);
+    if (!request.buffer && fallbackUrl && /Decode the file first/i.test(error.message)) {
+      request.buffer = await fetchArrayBuffer(fallbackUrl);
       return askSandbox(request);
     }
     throw error;
   }
 }
 
-function convertSelected(url, format, buffer) {
-  const baseName = currentBaseName(url);
+function convertSelected(key, format, buffer, baseName) {
   const png = (format === "obj" || format === "gltf") && pngCheckbox.checked;
   return runSandboxJob({
     type: "convert",
-    key: url,
+    key,
     buffer,
     format,
     options: { png, baseName },
     baseName,
-  }, url);
+  }, selectedEntry?.url || "");
 }
 
 function formatBytes(size) {
@@ -740,15 +952,43 @@ function updateFormatUi() {
 
 async function scan() {
   try {
-    setBusy(true, "Searching this tab for Tripo models...");
-    const links = await getLinksFromActiveTab();
-    fillLinks(links);
-    const count = links.length;
+    setBusy(true, "Reading your Tripo library...");
+    const [linksResult, libraryResult] = await Promise.allSettled([
+      getLinksFromActiveTab(),
+      getLibraryFromTab(),
+    ]);
+    const links = linksResult.status === "fulfilled" ? linksResult.value : [];
+    const projects = libraryResult.status === "fulfilled"
+      ? libraryResult.value.projects || []
+      : [];
+    const entries = buildEntries(links, projects);
+    fillLinks(entries);
+
+    const count = entries.length;
+    const libraryError = libraryResult.status === "rejected"
+      ? libraryResult.reason?.message || "Could not read the Tripo library."
+      : "";
+    const cachedLibrary = libraryResult.status === "fulfilled" && libraryResult.value.cached;
+
+    if (!count) {
+      setStatus(
+        libraryError
+          ? `No models found. ${libraryError}`
+          : "Your Tripo library is empty. Create a model in Tripo, then rescan.",
+        libraryError ? "error" : "idle",
+      );
+      return;
+    }
+
+    const fromLibrary = projects.length > 0;
+    const hint = libraryError
+      ? ` ${libraryError}`
+      : cachedLibrary
+        ? " Showing the last saved list."
+        : "";
     setStatus(
-      count
-        ? `${count} model${count === 1 ? "" : "s"} found.${count === 1 ? " Open another model in Tripo to add it here." : ""}`
-        : "No Tripo model found. Reload the tab, let the model load, then rescan.",
-      count ? "ok" : "idle",
+      `${count} model${count === 1 ? "" : "s"} ${fromLibrary ? "in your Tripo library" : "found in this tab"}.${hint}`,
+      fromLibrary && !libraryError && !cachedLibrary ? "ok" : "idle",
     );
   } catch (error) {
     setStatus(`Scan error: ${error.message}`, "error");
@@ -759,8 +999,8 @@ async function scan() {
 
 async function reloadActiveTab() {
   try {
-    const tab = await getActiveTab();
-    setStatus("Reloading the tab. The model is captured when it loads again.", "busy");
+    const tab = await getTripoTab();
+    setStatus("Reloading the Tripo tab. The library loads when the page is ready.", "busy");
     await chrome.tabs.reload(tab.id);
     const onUpdated = (tabId, info) => {
       if (tabId !== tab.id || info.status !== "complete") return;
@@ -848,7 +1088,7 @@ textureBox.addEventListener("toggle", () => {
 linksList.addEventListener("click", (event) => {
   const button = event.target.closest(".model");
   if (button) {
-    selectModel(button.dataset.url);
+    selectEntry(currentModelEntries[Number(button.dataset.index)]);
     return;
   }
   if (event.target.closest('[data-action="reload-tab"]')) reloadActiveTab();
@@ -867,27 +1107,28 @@ linksList.addEventListener("keydown", (event) => {
   if (next === null) return;
 
   event.preventDefault();
-  selectModel(buttons[next].dataset.url, true);
+  selectEntry(currentModelEntries[Number(buttons[next].dataset.index)], true);
 });
 
 inspectButton.addEventListener("click", async () => {
-  const url = selectedUrl;
-  if (!url) {
+  const entry = selectedEntry;
+  if (!entry) {
     setStatus("No Tripo model selected.", "error");
     return;
   }
 
+  const key = selectionKey;
   try {
-    setBusy(true, inspectedKey === url ? "Reading textures..." : "Downloading Tripo GLB...");
-    const buffer = inspectedKey === url ? null : await fetchArrayBuffer(url);
+    setBusy(true, inspectedKey === key ? "Reading textures..." : "Downloading Tripo GLB...");
+    const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
     setBusy(true, "Decoding meshopt...");
     const response = await runSandboxJob({
       type: "inspect",
-      key: url,
+      key,
       buffer,
-      baseName: currentBaseName(url),
-    }, url);
-    inspectedKey = url;
+      baseName: currentBaseName(entry),
+    }, entry.url || "");
+    inspectedKey = key;
     lastPreviews = response.previews || [];
     renderTextures(response.stats, lastPreviews);
     const summary = describeStats(response.stats);
@@ -903,19 +1144,20 @@ inspectButton.addEventListener("click", async () => {
 });
 
 convertButton.addEventListener("click", async () => {
-  const url = selectedUrl;
-  if (!url) {
+  const entry = selectedEntry;
+  if (!entry) {
     setStatus("No Tripo model selected.", "error");
     return;
   }
 
+  const key = selectionKey;
   try {
     const format = currentFormat();
-    setBusy(true, inspectedKey === url ? "Building output..." : "Downloading Tripo GLB...");
-    const buffer = inspectedKey === url ? null : await fetchArrayBuffer(url);
+    setBusy(true, inspectedKey === key ? "Building output..." : "Downloading Tripo GLB...");
+    const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
     setBusy(true, FORMAT_PROGRESS[format] || "Converting...");
-    const response = await convertSelected(url, format, buffer);
-    inspectedKey = url;
+    const response = await convertSelected(key, format, buffer, currentBaseName(entry));
+    inspectedKey = key;
 
     const { result } = response;
     setBusy(true, FORMAT_SAVE[format] || "Saving file...");
