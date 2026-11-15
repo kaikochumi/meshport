@@ -825,7 +825,7 @@ async function fetchArrayBuffer(url) {
     throw new Error(`Download failed: ${error.message}. Reload the model page and try again.`);
   }
   if (response.status === 403) {
-    throw new Error("The Tripo link expired. Reload the model page and try again.");
+    throw new Error("The Tripo download link expired.");
   }
   if (!response.ok) {
     throw new Error(`Download failed: ${response.status} ${response.statusText}`);
@@ -837,23 +837,84 @@ function isExpiredLinkError(error) {
   return /expired|\b403\b/i.test(error?.message || "");
 }
 
-async function fetchSelectedBuffer() {
-  const entry = selectedEntry;
-  if (!entry) throw new Error("No Tripo model selected.");
+function rememberModelLink(entry, url) {
+  if (!entry?.projectId) return;
+  const links = loadModelLinks();
+  links[entry.projectId] = {
+    url,
+    at: entry.resolvedAt,
+    name: entry.name || "",
+  };
+  saveModelLinks(links);
+}
 
+async function downloadEntry(entry) {
   if (!entry.url) {
     setStatus("Asking Tripo for the model...", "busy");
     await resolveLibraryEntry(entry);
   }
+  return new Uint8Array(await fetchArrayBuffer(entry.url));
+}
 
+async function exportEntryGlb(entry, kind) {
+  const stored = kind === "fbx" ? "an FBX file" : "a format Meshport cannot read";
+  setStatus(`Tripo keeps this model as ${stored}. Asking Tripo for a GLB...`, "busy");
+
+  const tab = await getTripoTab();
+  let response;
   try {
-    return await fetchArrayBuffer(entry.url);
+    response = await chrome.tabs.sendMessage(tab.id, {
+      type: "export-tripo-project",
+      projectId: entry.projectId,
+    });
+  } catch {
+    throw new Error("Reload the Tripo tab so Meshport can ask Tripo for a GLB.");
+  }
+  if (!response?.ok) {
+    throw new Error(response?.error || "Tripo did not export this model as GLB.");
+  }
+
+  const bytes = new Uint8Array(await fetchArrayBuffer(response.url));
+  const exported = meshportModelKind(bytes);
+  let glb = null;
+  if (exported === "glb") glb = bytes;
+  else if (exported === "zip") glb = await meshportGlbFromZip(bytes.buffer);
+  if (!glb) throw new Error("Tripo exported this model without a GLB.");
+
+  entry.url = response.url;
+  entry.resolvedAt = Date.now();
+  rememberModelLink(entry, response.url);
+  return glb;
+}
+
+async function fetchSelectedBuffer() {
+  const entry = selectedEntry;
+  if (!entry) throw new Error("No Tripo model selected.");
+
+  let bytes;
+  try {
+    bytes = await downloadEntry(entry);
   } catch (error) {
     if (!entry.projectId || !isExpiredLinkError(error)) throw error;
     setStatus("Refreshing the Tripo link...", "busy");
     await resolveLibraryEntry(entry, true);
-    return fetchArrayBuffer(entry.url);
+    bytes = await downloadEntry(entry);
   }
+
+  const kind = meshportModelKind(bytes);
+  if (kind === "glb") return bytes.buffer;
+  if (kind === "zip") {
+    const glb = await meshportGlbFromZip(bytes.buffer);
+    if (glb) return glb.buffer;
+  }
+  if (entry.projectId) {
+    return (await exportEntryGlb(entry, kind)).buffer;
+  }
+  throw new Error(
+    kind === "fbx"
+      ? "This model is an FBX file. Open it in Tripo and export it as GLB."
+      : "This download is not a GLB file.",
+  );
 }
 
 async function runSandboxJob(request, fallbackUrl) {

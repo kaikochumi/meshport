@@ -70,6 +70,93 @@ function tripoProjectCreatedAt(project) {
   return "";
 }
 
+const FBX_MAGIC = "Kaydara FBX Binary  \u0000\u001a\u0000";
+
+function meshportModelKind(bytes) {
+  if (!bytes || bytes.length < 4) return "unknown";
+  if (bytes[0] === 0x67 && bytes[1] === 0x6c && bytes[2] === 0x54 && bytes[3] === 0x46) {
+    return "glb";
+  }
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b && [3, 5, 7].includes(bytes[2])) {
+    return "zip";
+  }
+  if (bytes.length >= FBX_MAGIC.length) {
+    let matches = true;
+    for (let index = 0; index < FBX_MAGIC.length; index++) {
+      if (bytes[index] !== FBX_MAGIC.charCodeAt(index)) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return "fbx";
+  }
+  return "unknown";
+}
+
+function zipEndOfCentralDirectory(view) {
+  const lowest = Math.max(0, view.byteLength - 66_000);
+  for (let offset = view.byteLength - 22; offset >= lowest; offset--) {
+    if (view.getUint32(offset, true) === 0x06054b50) return offset;
+  }
+  return -1;
+}
+
+async function zipEntryBytes(bytes, view, entry) {
+  if (entry.method !== 0 && entry.method !== 8) {
+    throw new Error("Tripo sent a ZIP file with an unsupported compression.");
+  }
+  const offset = entry.localOffset;
+  if (offset + 30 > bytes.length || view.getUint32(offset, true) !== 0x04034b50) {
+    throw new Error("Tripo sent a ZIP file with a broken entry.");
+  }
+  const start = offset + 30 + view.getUint16(offset + 26, true) + view.getUint16(offset + 28, true);
+  const end = start + entry.compressed;
+  if (end > bytes.length) throw new Error("Tripo sent a ZIP file that ends too early.");
+  const data = bytes.subarray(start, end);
+  if (entry.method === 0) return new Uint8Array(data);
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function meshportGlbFromZip(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const end = zipEndOfCentralDirectory(view);
+  if (end < 0) throw new Error("Tripo sent a ZIP file that could not be read.");
+  const count = view.getUint16(end + 10, true);
+  const centralSize = view.getUint32(end + 12, true);
+  let offset = view.getUint32(end + 16, true);
+  if (!count || count > 1024 || offset + centralSize > end) {
+    throw new Error("Tripo sent a ZIP file Meshport cannot read.");
+  }
+
+  const entries = [];
+  for (let index = 0; index < count; index++) {
+    if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) {
+      throw new Error("Tripo sent a ZIP file with a broken index.");
+    }
+    if (view.getUint16(offset + 8, true) & 1) {
+      throw new Error("Tripo sent an encrypted ZIP file.");
+    }
+    const nameLength = view.getUint16(offset + 28, true);
+    const name = new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+    entries.push({
+      name,
+      method: view.getUint16(offset + 10, true),
+      compressed: view.getUint32(offset + 20, true),
+      size: view.getUint32(offset + 24, true),
+      localOffset: view.getUint32(offset + 42, true),
+    });
+    offset += 46 + nameLength + view.getUint16(offset + 30, true) + view.getUint16(offset + 32, true);
+  }
+
+  const model = entries
+    .filter((entry) => /\.glb$/i.test(entry.name))
+    .sort((a, b) => b.size - a.size)[0];
+  if (!model) return null;
+  return zipEntryBytes(bytes, view, model);
+}
+
 function tripoLibraryProject(project, scope) {
   const id = project?.id;
   if (!id) return null;
@@ -86,3 +173,5 @@ function tripoLibraryProject(project, scope) {
 globalThis.isTripoGlbUrl = isTripoGlbUrl;
 globalThis.tripoFileStem = tripoFileStem;
 globalThis.tripoLibraryProject = tripoLibraryProject;
+globalThis.meshportModelKind = meshportModelKind;
+globalThis.meshportGlbFromZip = meshportGlbFromZip;

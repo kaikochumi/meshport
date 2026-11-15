@@ -40,6 +40,8 @@ The Settings tab sets a subfolder inside Downloads, switches the download to ask
 
 Tripo model links are signed and expire after a few minutes. Meshport asks for a fresh link when a download fails with 403.
 
+Some Tripo models, mostly the quad Smart Mesh ones, are stored as FBX instead of GLB. When Meshport gets one of those, it asks Tripo for a GLB export, waits for it, and converts that file. The export is included with the model, so it does not use credits.
+
 ## Formats
 
 | Format | Files |
@@ -71,7 +73,7 @@ npm install
 npm test
 ```
 
-The suite covers the GLB parser, texture extraction, OBJ and MTL output, the zip writer, the glTF package builder, the meshopt decode path, and the library card parsing. It runs against `test/fixtures/cube-meshopt.glb`, a cube compressed with `gltfpack -cc`.
+The suite covers the GLB parser, texture extraction, OBJ and MTL output, the zip writer, the glTF package builder, the meshopt decode path, library card parsing, and the FBX/ZIP model detection. It runs against `test/fixtures/cube-meshopt.glb`, a cube compressed with `gltfpack -cc`.
 
 Rebuild the decoder bundle after upgrading glTF Transform or meshoptimizer:
 
