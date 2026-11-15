@@ -374,6 +374,12 @@ function transformDirection(m, v) {
   return [x / length, y / length, z / length];
 }
 
+function matrixDeterminant(m) {
+  return m[0] * (m[5] * m[10] - m[6] * m[9])
+    - m[1] * (m[4] * m[10] - m[6] * m[8])
+    + m[2] * (m[4] * m[9] - m[5] * m[8]);
+}
+
 function faceNormal(a, b, c) {
   const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
   const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
@@ -810,6 +816,189 @@ async function buildPreviews(textures) {
   return previews;
 }
 
+function thumbnailView() {
+  const cosY = Math.cos(-0.62);
+  const sinY = Math.sin(-0.62);
+  const cosX = Math.cos(0.34);
+  const sinX = Math.sin(0.34);
+  return (point) => {
+    const x = point[0] * cosY + point[2] * sinY;
+    const z = -point[0] * sinY + point[2] * cosY;
+    const y = point[1] * cosX - z * sinX;
+    return [x, y, point[1] * sinX + z * cosX];
+  };
+}
+
+async function thumbnailSampler(gltf, bin, materialIndex) {
+  const material = (gltf.materials || [])[materialIndex] || {};
+  const pbr = material.pbrMetallicRoughness || {};
+  const factor = pbr.baseColorFactor || [1, 1, 1, 1];
+  const textureInfo = pbr.baseColorTexture;
+  const fallback = { factor, texture: null, matrix: null, texCoord: 0 };
+
+  if (!textureInfo) return fallback;
+  if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return fallback;
+
+  const imageIndex = resolveImageIndex(gltf, textureInfo.index);
+  if (imageIndex < 0) return fallback;
+  const payload = imagePayload(gltf, bin, imageIndex);
+  if (!payload) return fallback;
+
+  try {
+    const bitmap = await createImageBitmap(new Blob([payload.bytes], { type: payload.mimeType }));
+    const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = new OffscreenCanvas(width, height);
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(bitmap, 0, 0, width, height);
+    const data = context.getImageData(0, 0, width, height).data;
+    if (typeof bitmap.close === "function") bitmap.close();
+    const uvInfo = uvInfoForMaterial(gltf, materialIndex);
+    return {
+      factor,
+      texture: { data, width, height },
+      matrix: uvInfo.matrix,
+      texCoord: uvInfo.texCoord,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function sampleThumbnailColor(sampler, uv) {
+  const color = sampler.factor;
+  const texture = sampler.texture;
+  if (!texture) return [color[0], color[1], color[2]];
+
+  const transformed = applyUvTransform(sampler.matrix, uv);
+  const x = ((transformed[0] % 1) + 1) % 1;
+  const y = ((transformed[1] % 1) + 1) % 1;
+  const texel = (Math.min(texture.height - 1, Math.floor(y * texture.height)) * texture.width
+    + Math.min(texture.width - 1, Math.floor(x * texture.width))) * 4;
+  return [
+    (texture.data[texel] / 255) * color[0],
+    (texture.data[texel + 1] / 255) * color[1],
+    (texture.data[texel + 2] / 255) * color[2],
+  ];
+}
+
+async function renderThumbnail(gltf, bin, size = 128) {
+  if (typeof document === "undefined") throw new Error("Thumbnails need a browser canvas.");
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("The browser did not provide a 2D canvas.");
+
+  const parts = [];
+  let triangles = 0;
+  for (const { node, world } of collectMeshNodes(gltf)) {
+    for (const primitive of gltf.meshes[node.mesh]?.primitives || []) {
+      if (primitive.mode !== undefined && primitive.mode !== 4) continue;
+      if (primitive.attributes?.POSITION === undefined) continue;
+      const positions = accessorReader(gltf, bin, primitive.attributes.POSITION);
+      const indices = primitive.indices === undefined ? null : accessorReader(gltf, bin, primitive.indices);
+      triangles += Math.floor((indices ? indices.count : positions.count) / 3);
+      parts.push({ primitive, world, positions, indices });
+    }
+  }
+  if (!parts.length || !triangles) throw new Error("The model has no triangles to preview.");
+
+  const view = thumbnailView();
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const part of parts) {
+    for (let index = 0; index < part.positions.count; index++) {
+      const point = view(transform(part.world, part.positions.get(index)));
+      if (point[0] < minX) minX = point[0];
+      if (point[0] > maxX) maxX = point[0];
+      if (point[1] < minY) minY = point[1];
+      if (point[1] > maxY) maxY = point[1];
+    }
+  }
+
+  const spread = Math.max(maxX - minX, maxY - minY) || 1;
+  const padding = size * 0.12;
+  const scale = (size - padding * 2) / spread;
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const project = (point) => {
+    const viewPoint = view(point);
+    return [
+      size / 2 + (viewPoint[0] - centerX) * scale,
+      size / 2 - (viewPoint[1] - centerY) * scale,
+    ];
+  };
+
+  const materialIndexes = new Set(parts.map((part) => part.primitive.material).filter(Number.isInteger));
+  const samplers = new Map();
+  await Promise.all([...materialIndexes].map(async (index) => {
+    samplers.set(index, await thumbnailSampler(gltf, bin, index));
+  }));
+  const neutral = { factor: [0.82, 0.86, 0.78, 1], texture: null, matrix: null, texCoord: 0 };
+  const light = [-0.34, 0.58, 0.74];
+  const lightLength = Math.hypot(...light);
+  const lx = light[0] / lightLength;
+  const ly = light[1] / lightLength;
+  const lz = light[2] / lightLength;
+  const stride = Math.max(1, Math.ceil(triangles / 40000));
+
+  for (const part of parts) {
+    const { primitive, world, positions, indices } = part;
+    const sampler = samplers.get(primitive.material) || neutral;
+    const uvAccessor = sampler.texture
+      ? primitive.attributes[`TEXCOORD_${sampler.texCoord}`]
+      : undefined;
+    const uvs = uvAccessor === undefined ? null : accessorReader(gltf, bin, uvAccessor);
+    const count = indices ? indices.count : positions.count;
+    const doubleSided = Boolean(gltf.materials?.[primitive.material]?.doubleSided);
+    const flipped = matrixDeterminant(world) < 0;
+
+    for (let index = 0; index + 2 < count; index += 3 * stride) {
+      const ia = indices ? indices.get(index)[0] : index;
+      const ib = indices ? indices.get(index + 1)[0] : index + 1;
+      const ic = indices ? indices.get(index + 2)[0] : index + 2;
+      const worldA = transform(world, positions.get(ia));
+      const worldB = transform(world, positions.get(ib));
+      const worldC = transform(world, positions.get(ic));
+      const a = project(worldA);
+      const b = project(worldB);
+      const c = project(worldC);
+      const area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+      if (!doubleSided && (flipped ? area <= 0 : area >= 0)) continue;
+
+      const normal = faceNormal(worldA, worldB, worldC);
+      const diffuse = Math.abs(normal[0] * lx + normal[1] * ly + normal[2] * lz);
+      const shade = 0.48 + 0.6 * diffuse;
+
+      let color = [sampler.factor[0], sampler.factor[1], sampler.factor[2]];
+      if (uvs) {
+        const uvA = uvs.get(ia);
+        const uvB = uvs.get(ib);
+        const uvC = uvs.get(ic);
+        color = sampleThumbnailColor(sampler, [
+          (uvA[0] + uvB[0] + uvC[0]) / 3,
+          (uvA[1] + uvB[1] + uvC[1]) / 3,
+        ]);
+      }
+
+      context.fillStyle = `rgb(${Math.min(255, Math.round(color[0] * 255 * shade))},${
+        Math.min(255, Math.round(color[1] * 255 * shade))},${Math.min(255, Math.round(color[2] * 255 * shade))})`;
+      context.beginPath();
+      context.moveTo(a[0], a[1]);
+      context.lineTo(b[0], b[1]);
+      context.lineTo(c[0], c[1]);
+      context.closePath();
+      context.fill();
+    }
+  }
+
+  return canvas.toDataURL("image/png");
+}
+
 function exactBytes(bytes) {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
 }
@@ -821,9 +1010,16 @@ async function handleSandboxMessage(event) {
     event.source.postMessage({ type: "pong", id: data.id }, event.origin);
     return;
   }
-  if (data.type !== "convert" && data.type !== "inspect") return;
+  if (data.type !== "convert" && data.type !== "inspect" && data.type !== "thumbnail") return;
 
   try {
+    if (data.type === "thumbnail") {
+      const glb = await decodeTripo(data.buffer, data.key);
+      const { json, bin } = readGlb(glb);
+      const thumbnail = await renderThumbnail(json, bin, 128);
+      event.source.postMessage({ id: data.id, ok: true, thumbnail }, event.origin);
+      return;
+    }
     if (data.type === "inspect") {
       const glb = await decodeTripo(data.buffer, data.key);
       const { json, bin } = readGlb(glb);
@@ -880,6 +1076,7 @@ export {
   imagePayload,
   makeOutputs,
   readGlb,
+  renderThumbnail,
   resolveImageIndex,
   sniffMime,
   textureAssignments,

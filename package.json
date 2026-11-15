@@ -1,9 +1,15 @@
 {
   "name": "meshport",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Browser extension that exports Tripo Studio models to STL, OBJ, glTF, GLB, or textures.",
+  "author": "kaikochumi (https://github.com/kaikochumi)",
+  "homepage": "https://github.com/kaikochumi/meshport#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kaikochumi/meshport.git"
+  },
   "scripts": {
     "build:vendor": "node tools/build-vendor.mjs",
     "make:fixture": "node tools/make-fixture.mjs",

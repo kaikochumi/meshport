@@ -2,7 +2,11 @@
 
 Meshport is a browser extension that exports models from Tripo Studio. It catches the GLB the page loads, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, or a folder of textures.
 
+Built by [@kaikochumi](https://github.com/kaikochumi).
+
 ![Meshport popup](docs/popup.png)
+
+Each detected model gets a preview rendered from its GLB.
 
 Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`. Blender, PrusaSlicer, and other tools do not open those files. Meshport removes both extensions before it writes the output, so the result opens elsewhere.
 
@@ -22,7 +26,7 @@ To update, replace the folder and click the reload button on the extensions page
 
 1. Open a model in Tripo Studio.
 2. Reload the page if you installed the extension after the model loaded. It only sees requests made while it runs.
-3. Click the Meshport icon. The popup lists the models it found in the tab, newest first.
+3. Click the Meshport icon. The popup lists the models it found in the tab, newest first, with a preview of each one.
 4. Pick a model, change the file name if you want, and choose a format.
 5. Click the download button.
 
@@ -48,6 +52,7 @@ STL cannot store textures. Use OBJ or glTF when you need the maps.
 - Textures keep their original format unless `Convert textures to PNG` is on. PNG opens in more editors and takes more space.
 - OBJ export writes UVs, a material library, and applies the `KHR_texture_transform` declared by each material.
 - The popup remembers the format and the PNG setting. It does not remember the file name because that belongs to the model.
+- Previews are rendered locally and cached, so the popup opens faster the next time.
 - The GLB export is decoded, not re-encoded.
 - Download only models you have the right to use.
 
@@ -76,4 +81,4 @@ npm run make:fixture
 
 ## Credits
 
-The exporters started in [Meshy AI to STL](https://github.com/ChesterTheCatt/meshy-ai-to-stl) and were adapted for Tripo Studio. [@ChesterTheCatt](https://github.com/ChesterTheCatt) wrote the original extension.
+Built by [@kaikochumi](https://github.com/kaikochumi). The exporters started in [Meshy AI to STL](https://github.com/ChesterTheCatt/meshy-ai-to-stl) and were adapted for Tripo Studio. [@ChesterTheCatt](https://github.com/ChesterTheCatt) wrote the original extension.

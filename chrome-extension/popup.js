@@ -41,6 +41,8 @@ const FORMAT_SAVE = {
 const MODEL_GLYPH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5 12 12 4 7.5Z" fill="currentColor"/><path d="M4 9 11 13v8L4 17Z" fill="currentColor" opacity=".55"/><path d="M20 9 13 13v8l7-4Z" fill="currentColor" opacity=".8"/></svg>';
 
 const PREFS_KEY = "meshport/preferences";
+const THUMB_KEY = "meshport/thumbnails/v1";
+const THUMB_LIMIT = 24;
 
 let jobId = 0;
 let busy = false;
@@ -49,6 +51,11 @@ let inspectedKey = "";
 let previewUrls = [];
 let lastPreviews = [];
 let sandboxReadyPromise = null;
+let thumbnailCache = loadThumbnailCache();
+let thumbnailQueue = Promise.resolve();
+let thumbnailObserver = null;
+let idleWaiters = [];
+let scanToken = 0;
 
 function sandboxReady() {
   if (sandboxReadyPromise) return sandboxReadyPromise;
@@ -91,6 +98,72 @@ function sandboxReady() {
   return sandboxReadyPromise;
 }
 
+function loadThumbnailCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(THUMB_KEY) || "null");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveThumbnailCache() {
+  const keys = Object.keys(thumbnailCache);
+  while (keys.length > THUMB_LIMIT) delete thumbnailCache[keys.shift()];
+  try {
+    localStorage.setItem(THUMB_KEY, JSON.stringify(thumbnailCache));
+  } catch {
+    // The cache is optional.
+  }
+}
+
+function thumbnailKey(url) {
+  return tripoFileStem(url) || url;
+}
+
+function modelLabel(stem) {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stem)) {
+    return `Model ${stem.slice(0, 8)}`;
+  }
+  return stem;
+}
+
+function waitForIdle() {
+  if (!busy) return Promise.resolve();
+  return new Promise((resolve) => idleWaiters.push(resolve));
+}
+
+function setThumbnail(card, dataUrl) {
+  if (!dataUrl?.startsWith("data:image/")) return;
+  const image = card.querySelector(".model-thumb img");
+  if (!image) return;
+  image.src = dataUrl;
+  requestAnimationFrame(() => {
+    card.classList.add("has-thumb");
+    card.classList.remove("loading");
+  });
+}
+
+async function generateThumbnail(entry, card, token, key) {
+  thumbnailObserver?.unobserve(card);
+  await waitForIdle();
+  if (token !== scanToken || !card.isConnected) return;
+
+  try {
+    const buffer = await fetchArrayBuffer(entry.url);
+    if (token !== scanToken || !card.isConnected) return;
+    const response = await askSandbox({ type: "thumbnail", key: entry.url, buffer }, 30000);
+    if (token !== scanToken || !card.isConnected) return;
+    thumbnailCache[key] = response.thumbnail;
+    saveThumbnailCache();
+    setThumbnail(card, response.thumbnail);
+  } catch {
+    // Keep the cube placeholder.
+  } finally {
+    card.classList.remove("loading");
+  }
+}
+
 function setStatus(text, tone = "idle") {
   statusEl.textContent = text;
   document.body.dataset.tone = tone;
@@ -112,6 +185,10 @@ function setBusy(isBusy, text) {
   progress.hidden = !isBusy;
   if (text !== undefined) setStatus(text, isBusy ? "busy" : "ok");
   updateActionState();
+  if (!isBusy) {
+    const waiters = idleWaiters.splice(0);
+    waiters.forEach((resolve) => resolve());
+  }
 }
 
 function sanitizeBaseName(value, fallback = "meshport-model") {
@@ -273,6 +350,7 @@ function selectModel(url, focus = false) {
 }
 
 function fillLinks(entries) {
+  const token = ++scanToken;
   selectedUrl = "";
   linksList.replaceChildren();
   modelCount.textContent = String(entries.length);
@@ -286,27 +364,30 @@ function fillLinks(entries) {
     return;
   }
 
-  for (const entry of entries) {
+  const cards = [];
+  entries.forEach((entry, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "model";
     button.dataset.url = entry.url;
+    button.dataset.index = String(index);
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", "false");
     button.tabIndex = -1;
+    button.style.setProperty("--i", String(Math.min(index, 8)));
 
     const stem = tripoFileStem(entry.url) || "tripo-model";
     button.title = stem;
 
-    const glyph = document.createElement("span");
-    glyph.className = "model-glyph";
-    glyph.innerHTML = MODEL_GLYPH;
+    const thumb = document.createElement("span");
+    thumb.className = "model-thumb";
+    thumb.innerHTML = `<span class="thumb-fallback">${MODEL_GLYPH}</span><img alt="" decoding="async">`;
 
     const text = document.createElement("span");
     text.className = "model-text";
     const name = document.createElement("span");
     name.className = "model-name";
-    name.textContent = stem;
+    name.textContent = modelLabel(stem);
     const meta = document.createElement("span");
     meta.className = "model-meta";
     meta.textContent = entry.capturedAt
@@ -314,11 +395,45 @@ function fillLinks(entries) {
       : "Detected in this tab";
     text.append(name, meta);
 
-    button.append(glyph, text);
+    button.append(thumb, text);
     linksList.append(button);
-  }
+    cards.push(button);
+  });
 
   selectModel(entries[0].url);
+
+  thumbnailObserver?.disconnect();
+  thumbnailObserver = new IntersectionObserver((records) => {
+    for (const record of records) {
+      if (!record.isIntersecting) continue;
+      const card = record.target;
+      const entry = entries[Number(card.dataset.index)];
+      if (!entry) continue;
+      const key = thumbnailKey(entry.url);
+      const cached = thumbnailCache[key];
+      if (cached) {
+        setThumbnail(card, cached);
+        thumbnailObserver.unobserve(card);
+        continue;
+      }
+      if (card.dataset.queued === "1") continue;
+      card.dataset.queued = "1";
+      card.classList.add("loading");
+      thumbnailQueue = thumbnailQueue
+        .then(() => generateThumbnail(entry, card, token, key))
+        .catch(() => {});
+    }
+  }, { root: linksList, rootMargin: "48px 0px", threshold: 0.01 });
+
+  cards.forEach((card) => {
+    const entry = entries[Number(card.dataset.index)];
+    const cached = thumbnailCache[thumbnailKey(entry.url)];
+    if (cached) {
+      setThumbnail(card, cached);
+    } else {
+      thumbnailObserver.observe(card);
+    }
+  });
 }
 
 function downloadBlob(blob, filename) {
@@ -338,7 +453,7 @@ function downloadBlob(blob, filename) {
   });
 }
 
-async function askSandbox({ type, key, buffer, format, options, baseName }) {
+async function askSandbox({ type, key, buffer, format, options, baseName }, timeout = 120000) {
   await sandboxReady();
   return new Promise((resolve, reject) => {
     const id = ++jobId;
@@ -352,7 +467,7 @@ async function askSandbox({ type, key, buffer, format, options, baseName }) {
     const timer = setTimeout(() => {
       window.removeEventListener("message", onMessage);
       reject(new Error("The converter did not respond. Reload the extension and try again."));
-    }, 120000);
+    }, timeout);
     window.addEventListener("message", onMessage);
 
     const payload = { type, id, key, format, options, baseName };
