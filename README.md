@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" width="132" alt="Meshport cube logo">
+</p>
+
 # Meshport
 
 Meshport is a browser extension that exports models from your Tripo Studio library. It reads the library with the session already open in Tripo, fetches each model, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, or a folder of textures.
