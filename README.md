@@ -6,11 +6,11 @@ Tripo serves models as GLB files compressed with `EXT_meshopt_compression` and q
 
 ## Requirements
 
-Google Chrome or another Chromium browser. No account setup and no server. The decoder ships inside `chrome-extension/vendor`, so there is nothing to build before loading the extension.
+Google Chrome, Microsoft Edge, or another Chromium browser. No account setup and no server. The decoder ships inside `chrome-extension/vendor`, so there is nothing to build before loading the extension.
 
 ## Installation
 
-1. Open `chrome://extensions`.
+1. Open the extensions page: `chrome://extensions` in Chrome, `edge://extensions` in Edge.
 2. Turn on `Developer mode`.
 3. Click `Load unpacked`.
 4. Pick the `chrome-extension` folder inside this project.
@@ -45,7 +45,7 @@ Tripo links are signed and stop working after a few minutes. If the extension re
 - OBJ export writes UVs and an `.mtl` that points at the exported images. It also applies the UV set and `KHR_texture_transform` declared by each material.
 - The popup remembers the format and the PNG setting between sessions. The file name is not remembered because it belongs to the model you picked.
 - Tripo limits exports on some plans. Download only models you have the right to use.
-- The extension is not on the Chrome Web Store. Update it by replacing the folder and clicking reload in `chrome://extensions`.
+- The extension is not on the Chrome Web Store. Update it by replacing the folder and clicking reload on the extensions page.
 - The GLB export is the decoded model. Nothing is re-encoded.
 
 ## Development

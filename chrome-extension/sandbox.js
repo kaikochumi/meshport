@@ -814,45 +814,53 @@ function exactBytes(bytes) {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
 }
 
-if (typeof window !== "undefined") {
-  window.addEventListener("message", async (event) => {
-    const data = event.data;
-    if (!data || (data.type !== "convert" && data.type !== "inspect")) return;
-    try {
-      if (data.type === "inspect") {
-        const glb = await decodeTripo(data.buffer, data.key);
-        const { json, bin } = readGlb(glb);
-        const baseName = sanitize(data.baseName, "model");
-        const textures = extractTextures(json, bin, baseName);
-        const stats = describeModel(json);
-        stats.textures = textures.map((texture) => ({
-          name: texture.name,
-          role: texture.role,
-          mimeType: texture.mimeType,
-          size: texture.bytes.length,
-        }));
-        const previews = await buildPreviews(textures);
-        event.source.postMessage({ id: data.id, ok: true, stats, previews }, event.origin, previews.map((preview) => preview.thumb));
-        return;
-      }
+async function handleSandboxMessage(event) {
+  const data = event.data;
+  if (!data) return;
+  if (data.type === "ping") {
+    event.source.postMessage({ type: "pong", id: data.id }, event.origin);
+    return;
+  }
+  if (data.type !== "convert" && data.type !== "inspect") return;
 
+  try {
+    if (data.type === "inspect") {
       const glb = await decodeTripo(data.buffer, data.key);
-      const result = await makeOutputs(glb, data.format, data.options || {});
-      const bytes = exactBytes(result.bytes);
-      event.source.postMessage(
-        {
-          id: data.id,
-          ok: true,
-          stats: result.stats,
-          result: { fileName: result.fileName, mimeType: result.mimeType, bytes },
-        },
-        event.origin,
-        [bytes.buffer]
-      );
-    } catch (error) {
-      event.source.postMessage({ id: data.id, ok: false, error: error.message || String(error) }, event.origin);
+      const { json, bin } = readGlb(glb);
+      const baseName = sanitize(data.baseName, "model");
+      const textures = extractTextures(json, bin, baseName);
+      const stats = describeModel(json);
+      stats.textures = textures.map((texture) => ({
+        name: texture.name,
+        role: texture.role,
+        mimeType: texture.mimeType,
+        size: texture.bytes.length,
+      }));
+      const previews = await buildPreviews(textures);
+      event.source.postMessage({ id: data.id, ok: true, stats, previews }, event.origin, previews.map((preview) => preview.thumb));
+      return;
     }
-  });
+
+    const glb = await decodeTripo(data.buffer, data.key);
+    const result = await makeOutputs(glb, data.format, data.options || {});
+    const bytes = exactBytes(result.bytes);
+    event.source.postMessage(
+      {
+        id: data.id,
+        ok: true,
+        stats: result.stats,
+        result: { fileName: result.fileName, mimeType: result.mimeType, bytes },
+      },
+      event.origin,
+      [bytes.buffer]
+    );
+  } catch (error) {
+    event.source.postMessage({ id: data.id, ok: false, error: error.message || String(error) }, event.origin);
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("message", handleSandboxMessage);
 }
 
 export {
@@ -868,6 +876,7 @@ export {
   describeModel,
   extractTextures,
   glbToBinaryStl,
+  handleSandboxMessage,
   imagePayload,
   makeOutputs,
   readGlb,

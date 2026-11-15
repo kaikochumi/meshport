@@ -8,6 +8,7 @@ import {
   decodeTripo,
   describeModel,
   extractTextures,
+  handleSandboxMessage,
   makeOutputs,
   readGlb,
 } from "../chrome-extension/sandbox.js";
@@ -141,4 +142,48 @@ test("GLB export writes the cleaned model", async () => {
   ));
   assert.equal(json.extensionsUsed?.includes("EXT_meshopt_compression"), false);
   assert.equal(describeModel(json).triangles, 12);
+});
+
+function makeChannel() {
+  const replies = [];
+  const source = {
+    postMessage: (message, origin) => replies.push({ message, origin }),
+  };
+  return { replies, source };
+}
+
+test("sandbox answers the ready ping", async () => {
+  const { replies, source } = makeChannel();
+  await handleSandboxMessage({
+    data: { type: "ping", id: "p1" },
+    source,
+    origin: "chrome-extension://abc",
+  });
+  assert.deepEqual(replies, [{
+    message: { type: "pong", id: "p1" },
+    origin: "chrome-extension://abc",
+  }]);
+});
+
+test("sandbox converts a request from the popup", async () => {
+  const { replies, source } = makeChannel();
+  await handleSandboxMessage({
+    data: {
+      type: "convert",
+      id: 7,
+      key: "protocol",
+      buffer: FIXTURE,
+      format: "obj",
+      options: { png: true, baseName: "cube" },
+      baseName: "cube",
+    },
+    source,
+    origin: "chrome-extension://abc",
+  });
+
+  const reply = replies[0].message;
+  assert.equal(reply.id, 7);
+  assert.equal(reply.ok, true);
+  assert.equal(reply.result.fileName, "cube-obj.zip");
+  assert.deepEqual([...new Uint8Array(reply.result.bytes).subarray(0, 2)], [0x50, 0x4b]);
 });

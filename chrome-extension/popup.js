@@ -29,6 +29,14 @@ const FORMAT_PROGRESS = {
   textures: "Extracting textures...",
 };
 
+const FORMAT_SAVE = {
+  stl: "Saving STL...",
+  obj: "Saving OBJ + textures...",
+  gltf: "Saving glTF + textures...",
+  glb: "Saving GLB...",
+  textures: "Saving textures...",
+};
+
 const PREFS_KEY = "tripo-to-stl/preferences";
 
 let jobId = 0;
@@ -38,11 +46,43 @@ let lastPreviews = [];
 let sandboxReadyPromise = null;
 
 function sandboxReady() {
-  if (!sandboxReadyPromise) {
-    sandboxReadyPromise = new Promise((resolve) => {
-      sandboxFrame.addEventListener("load", resolve, { once: true });
-    });
-  }
+  if (sandboxReadyPromise) return sandboxReadyPromise;
+
+  sandboxReadyPromise = new Promise((resolve, reject) => {
+    const id = `ping-${++jobId}`;
+    let attempts = 0;
+
+    function stop(error) {
+      clearInterval(timer);
+      window.removeEventListener("message", onMessage);
+      if (error) {
+        sandboxReadyPromise = null;
+        reject(error);
+      } else {
+        resolve();
+      }
+    }
+
+    function ping() {
+      attempts += 1;
+      if (attempts > 100) {
+        stop(new Error("The converter sandbox did not load. Reload the extension on the extensions page and try again."));
+        return;
+      }
+      sandboxFrame.contentWindow?.postMessage({ type: "ping", id }, "*");
+    }
+
+    function onMessage(event) {
+      if (event.source !== sandboxFrame.contentWindow) return;
+      if (event.data?.type !== "pong" || event.data.id !== id) return;
+      stop();
+    }
+
+    window.addEventListener("message", onMessage);
+    const timer = setInterval(ping, 150);
+    ping();
+  });
+
   return sandboxReadyPromise;
 }
 
@@ -208,7 +248,12 @@ function fillLinks(entries) {
 function downloadBlob(blob, filename) {
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(blob);
+    const timer = setTimeout(() => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("The download did not start. Try again."));
+    }, 30000);
     chrome.downloads.download({ url: objectUrl, filename, conflictAction: "uniquify", saveAs: false }, (downloadId) => {
+      clearTimeout(timer);
       const error = chrome.runtime.lastError;
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
       if (error) reject(new Error(error.message));
@@ -433,6 +478,7 @@ convertButton.addEventListener("click", async () => {
     inspectedKey = url;
 
     const { result } = response;
+    setBusy(true, FORMAT_SAVE[format] || "Saving file...");
     await downloadBlob(new Blob([result.bytes], { type: result.mimeType }), result.fileName);
 
     if (textureBox.hidden) renderTextures(response.stats, lastPreviews);

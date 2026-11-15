@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tripo To STL",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Finds Tripo Studio GLB models in the current tab and converts them to STL, OBJ, glTF, GLB, or textures.",
   "action": {
     "default_title": "Tripo To STL",
