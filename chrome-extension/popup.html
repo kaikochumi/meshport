@@ -134,7 +134,7 @@
           <label class="switch-row" id="ask-save-row">
             <span class="switch-text">
               <strong>Ask where to save</strong>
-              <small>Choose any folder for each download.</small>
+              <small>Pick any folder for each download.</small>
             </span>
             <input id="ask-save" type="checkbox">
             <span class="switch" aria-hidden="true"></span>
@@ -142,7 +142,11 @@
           <div class="field" id="folder-field">
             <label for="subfolder">Subfolder in Downloads</label>
             <input id="subfolder" type="text" placeholder="Meshport" autocomplete="off" spellcheck="false">
-            <p class="hint">The browser can only write inside Downloads. Leave it empty to save at the root.</p>
+          </div>
+          <p class="path-preview" id="path-preview">Downloads/model.glb</p>
+          <p class="hint">The browser can only write inside Downloads. Use Ask where to save when you need another folder.</p>
+          <div class="settings-actions">
+            <button id="open-downloads" class="mini-button" type="button">Open Downloads folder</button>
           </div>
         </section>
 
@@ -158,6 +162,17 @@
             <label class="chip"><input type="radio" name="default-format" value="textures"><span>Textures</span></label>
           </div>
           <p class="hint">The Export tab starts with this format.</p>
+        </section>
+
+        <section class="setting">
+          <div class="section-head">
+            <h2>Previews</h2>
+          </div>
+          <p class="hint" id="preview-count">No cached previews.</p>
+          <div class="settings-actions">
+            <button id="clear-previews" class="mini-button" type="button">Clear preview cache</button>
+            <button id="reset-settings" class="mini-button" type="button">Reset settings</button>
+          </div>
         </section>
 
         <section class="setting about">

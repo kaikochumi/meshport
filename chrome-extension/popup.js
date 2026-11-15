@@ -20,6 +20,11 @@ const viewSettings = document.getElementById("view-settings");
 const askSaveCheckbox = document.getElementById("ask-save");
 const folderField = document.getElementById("folder-field");
 const subfolderInput = document.getElementById("subfolder");
+const pathPreview = document.getElementById("path-preview");
+const openDownloadsButton = document.getElementById("open-downloads");
+const clearPreviewsButton = document.getElementById("clear-previews");
+const resetSettingsButton = document.getElementById("reset-settings");
+const previewCount = document.getElementById("preview-count");
 const defaultFormatInputs = [...document.querySelectorAll('input[name="default-format"]')];
 const versionEl = document.getElementById("version");
 
@@ -65,6 +70,7 @@ let thumbnailCache = loadThumbnailCache();
 let settings = loadSettings();
 let thumbnailQueue = Promise.resolve();
 let thumbnailObserver = null;
+let currentModelEntries = [];
 let idleWaiters = [];
 let scanToken = 0;
 
@@ -167,6 +173,7 @@ async function generateThumbnail(entry, card, token, key) {
     if (token !== scanToken || !card.isConnected) return;
     thumbnailCache[key] = response.thumbnail;
     saveThumbnailCache();
+    updatePreviewCount();
     setThumbnail(card, response.thumbnail);
   } catch {
     // Keep the cube placeholder.
@@ -282,6 +289,44 @@ function syncSettingsUi() {
   subfolderInput.value = settings.subfolder || "";
   subfolderInput.disabled = Boolean(settings.askSave);
   folderField.classList.toggle("disabled", Boolean(settings.askSave));
+  updatePathPreview();
+  updatePreviewCount();
+}
+
+function updatePathPreview() {
+  const folder = cleanSubfolder(settings.subfolder);
+  pathPreview.textContent = settings.askSave
+    ? "You pick the folder in the save dialog."
+    : folder
+      ? `Downloads/${folder}/model.glb`
+      : "Downloads/model.glb";
+}
+
+function updatePreviewCount() {
+  const count = Object.keys(thumbnailCache).length;
+  previewCount.textContent = count
+    ? `${count} preview${count === 1 ? "" : "s"} cached in this browser.`
+    : "No cached previews.";
+}
+
+function clearPreviewCache() {
+  thumbnailCache = {};
+  try {
+    localStorage.removeItem(THUMB_KEY);
+  } catch {
+    // The cache is optional.
+  }
+  const cards = [...linksList.querySelectorAll(".model")];
+  for (const card of cards) {
+    card.classList.remove("has-thumb", "loading");
+    card.querySelector(".model-thumb img")?.removeAttribute("src");
+  }
+  updatePreviewCount();
+  if (cards.length && currentModelEntries.length) {
+    primeThumbnails(currentModelEntries, cards);
+  } else {
+    thumbnailObserver?.disconnect();
+  }
 }
 
 function showView(name) {
@@ -293,6 +338,10 @@ function showView(name) {
   tabExport.tabIndex = isSettings ? -1 : 0;
   tabSettings.tabIndex = isSettings ? 0 : -1;
   document.body.classList.toggle("settings-open", isSettings);
+  if (isSettings) {
+    updatePathPreview();
+    updatePreviewCount();
+  }
   document.querySelector("main").scrollTop = 0;
 }
 
@@ -432,6 +481,7 @@ function selectModel(url, focus = false) {
 function fillLinks(entries) {
   const token = ++scanToken;
   entries = entries.filter((entry) => isTripoGlbUrl(entry.url));
+  currentModelEntries = entries;
   selectedUrl = "";
   linksList.replaceChildren();
   modelCount.textContent = String(entries.length);
@@ -489,7 +539,10 @@ function fillLinks(entries) {
   });
 
   selectModel(entries[0].url);
+  primeThumbnails(entries, cards);
+}
 
+function primeThumbnails(entries, cards) {
   thumbnailObserver?.disconnect();
   thumbnailObserver = new IntersectionObserver((records) => {
     for (const record of records) {
@@ -508,17 +561,18 @@ function fillLinks(entries) {
       card.dataset.queued = "1";
       card.classList.add("loading");
       thumbnailQueue = thumbnailQueue
-        .then(() => generateThumbnail(entry, card, token, key))
+        .then(() => generateThumbnail(entry, card, scanToken, key))
         .catch(() => {});
     }
   }, { root: linksList, rootMargin: "48px 0px", threshold: 0.01 });
 
   cards.forEach((card) => {
     const entry = entries[Number(card.dataset.index)];
-    const cached = thumbnailCache[thumbnailKey(entry.url)];
+    const cached = entry ? thumbnailCache[thumbnailKey(entry.url)] : "";
     if (cached) {
       setThumbnail(card, cached);
     } else {
+      card.dataset.queued = "0";
       thumbnailObserver.observe(card);
     }
   });
@@ -689,11 +743,12 @@ async function scan() {
     setBusy(true, "Searching this tab for Tripo models...");
     const links = await getLinksFromActiveTab();
     fillLinks(links);
+    const count = links.length;
     setStatus(
-      links.length
-        ? `${links.length} model${links.length === 1 ? "" : "s"} found.`
+      count
+        ? `${count} model${count === 1 ? "" : "s"} found.${count === 1 ? " Open another model in Tripo to add it here." : ""}`
         : "No Tripo model found. Reload the tab, let the model load, then rescan.",
-      links.length ? "ok" : "idle",
+      count ? "ok" : "idle",
     );
   } catch (error) {
     setStatus(`Scan error: ${error.message}`, "error");
@@ -760,10 +815,28 @@ askSaveCheckbox.addEventListener("change", () => {
 subfolderInput.addEventListener("input", () => {
   settings.subfolder = cleanSubfolder(subfolderInput.value);
   saveSettings();
+  updatePathPreview();
 });
 
 subfolderInput.addEventListener("blur", () => {
   subfolderInput.value = settings.subfolder;
+});
+
+openDownloadsButton.addEventListener("click", () => {
+  try {
+    chrome.downloads.showDefaultFolder();
+  } catch {
+    setStatus("Could not open the Downloads folder.", "error");
+  }
+});
+
+clearPreviewsButton.addEventListener("click", clearPreviewCache);
+
+resetSettingsButton.addEventListener("click", () => {
+  settings = { askSave: false, subfolder: "" };
+  saveSettings();
+  setFormat("stl");
+  syncSettingsUi();
 });
 
 pngCheckbox.addEventListener("change", savePreferences);
