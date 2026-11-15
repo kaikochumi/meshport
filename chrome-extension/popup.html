@@ -3,47 +3,121 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Tripo To STL</title>
+    <title>Meshport</title>
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
     <main>
-      <header>
-        <h1>Tripo To STL</h1>
-        <button id="scan" type="button" title="Refresh current tab scan">Refresh</button>
+      <header class="top">
+        <div class="brand">
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 3 20 7.5 12 12 4 7.5Z" fill="currentColor"/>
+              <path d="M4 9 11 13v8L4 17Z" fill="currentColor" opacity=".55"/>
+              <path d="M20 9 13 13v8l7-4Z" fill="currentColor" opacity=".8"/>
+            </svg>
+          </span>
+          <div class="brand-text">
+            <h1>Meshport</h1>
+            <p>Tripo Studio exporter</p>
+          </div>
+        </div>
+        <button id="scan" class="icon-button" type="button" title="Rescan this tab" aria-label="Rescan this tab">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 11a8 8 0 1 0-.7 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </header>
 
-      <select id="links" size="6" aria-label="Detected Tripo GLB files"></select>
+      <section>
+        <div class="section-head">
+          <h2>Model</h2>
+          <span id="model-count" class="count">0</span>
+        </div>
+        <div id="links" class="models" role="listbox" aria-label="Detected Tripo models">
+          <p class="empty">Scanning this tab...</p>
+        </div>
+      </section>
 
-      <label for="base-name">File name</label>
-      <input id="base-name" type="text" placeholder="model" autocomplete="off" spellcheck="false">
-
-      <label for="format">Output format</label>
-      <select id="format">
-        <option value="stl">STL (3D printing)</option>
-        <option value="obj">OBJ + textures (.zip)</option>
-        <option value="gltf">GLTF + textures (.zip)</option>
-        <option value="glb">GLB (decoded model)</option>
-        <option value="textures">Textures only (.zip)</option>
-      </select>
-
-      <label class="checkbox" id="png-row">
-        <input id="png" type="checkbox" checked>
-        Convert textures to PNG
-      </label>
-
-      <div class="row">
-        <button id="inspect" type="button" class="secondary">Inspect textures</button>
-        <button id="convert" type="button">Download STL</button>
+      <div class="field">
+        <label for="base-name">File name</label>
+        <input id="base-name" type="text" placeholder="model" autocomplete="off" spellcheck="false">
       </div>
 
-      <details id="texture-box" hidden>
-        <summary id="texture-summary">Textures</summary>
+      <section>
+        <div class="section-head">
+          <h2>Format</h2>
+        </div>
+        <div class="formats" role="radiogroup" aria-label="Output format">
+          <label class="format">
+            <input type="radio" name="format" value="stl" checked>
+            <span class="format-body">
+              <strong>STL</strong>
+              <small>3D printing</small>
+            </span>
+          </label>
+          <label class="format">
+            <input type="radio" name="format" value="obj">
+            <span class="format-body">
+              <strong>OBJ</strong>
+              <small>Mesh + textures</small>
+            </span>
+          </label>
+          <label class="format">
+            <input type="radio" name="format" value="gltf">
+            <span class="format-body">
+              <strong>glTF</strong>
+              <small>Scene + textures</small>
+            </span>
+          </label>
+          <label class="format">
+            <input type="radio" name="format" value="glb">
+            <span class="format-body">
+              <strong>GLB</strong>
+              <small>Clean single file</small>
+            </span>
+          </label>
+          <label class="format wide">
+            <input type="radio" name="format" value="textures">
+            <span class="format-body">
+              <strong>Textures only</strong>
+              <small>Every map in one zip</small>
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <label class="switch-row" id="png-row">
+        <span class="switch-text">
+          <strong>Convert textures to PNG</strong>
+          <small>Used by OBJ and glTF</small>
+        </span>
+        <input id="png" type="checkbox" checked>
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+
+      <details id="texture-box" class="textures" hidden>
+        <summary>
+          <span id="texture-summary">Textures</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </summary>
         <ul id="texture-list"></ul>
       </details>
 
-      <progress id="progress" hidden></progress>
-      <p id="status">Ready.</p>
+      <footer>
+        <div class="status-row">
+          <span class="dot" aria-hidden="true"></span>
+          <p id="status">Ready.</p>
+        </div>
+        <progress id="progress" hidden></progress>
+        <div class="actions">
+          <button id="inspect" class="ghost" type="button">Inspect</button>
+          <button id="convert" type="button">Download STL</button>
+        </div>
+      </footer>
     </main>
 
     <iframe id="sandbox" src="sandbox.html" hidden></iframe>

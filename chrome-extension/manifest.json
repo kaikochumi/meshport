@@ -1,11 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "Tripo To STL",
-  "version": "0.1.1",
-  "description": "Finds Tripo Studio GLB models in the current tab and converts them to STL, OBJ, glTF, GLB, or textures.",
+  "name": "Meshport",
+  "version": "0.2.0",
+  "description": "Export Tripo Studio models to STL, OBJ, glTF, GLB, or textures. Everything runs in your browser.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Tripo To STL",
-    "default_popup": "popup.html"
+    "default_title": "Meshport",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
   "permissions": [
     "activeTab",

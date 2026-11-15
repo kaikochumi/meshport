@@ -1,6 +1,7 @@
-const linksSelect = document.getElementById("links");
+const linksList = document.getElementById("links");
+const modelCount = document.getElementById("model-count");
 const baseNameInput = document.getElementById("base-name");
-const formatSelect = document.getElementById("format");
+const formatInputs = [...document.querySelectorAll('input[name="format"]')];
 const pngCheckbox = document.getElementById("png");
 const pngRow = document.getElementById("png-row");
 const scanButton = document.getElementById("scan");
@@ -37,9 +38,13 @@ const FORMAT_SAVE = {
   textures: "Saving textures...",
 };
 
-const PREFS_KEY = "tripo-to-stl/preferences";
+const MODEL_GLYPH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5 12 12 4 7.5Z" fill="currentColor"/><path d="M4 9 11 13v8L4 17Z" fill="currentColor" opacity=".55"/><path d="M20 9 13 13v8l7-4Z" fill="currentColor" opacity=".8"/></svg>';
+
+const PREFS_KEY = "meshport/preferences";
 
 let jobId = 0;
+let busy = false;
+let selectedUrl = "";
 let inspectedKey = "";
 let previewUrls = [];
 let lastPreviews = [];
@@ -86,16 +91,30 @@ function sandboxReady() {
   return sandboxReadyPromise;
 }
 
-function setBusy(isBusy, text) {
-  scanButton.disabled = isBusy;
-  baseNameInput.disabled = isBusy;
-  inspectButton.disabled = isBusy;
-  convertButton.disabled = isBusy;
-  progress.hidden = !isBusy;
-  if (text !== undefined) statusEl.textContent = text;
+function setStatus(text, tone = "idle") {
+  statusEl.textContent = text;
+  document.body.dataset.tone = tone;
 }
 
-function sanitizeBaseName(value, fallback = "tripo-model") {
+function updateActionState() {
+  const hasModel = Boolean(selectedUrl);
+  inspectButton.disabled = busy || !hasModel;
+  convertButton.disabled = busy || !hasModel;
+}
+
+function setBusy(isBusy, text) {
+  busy = isBusy;
+  scanButton.disabled = isBusy;
+  baseNameInput.disabled = isBusy;
+  formatInputs.forEach((input) => {
+    input.disabled = isBusy;
+  });
+  progress.hidden = !isBusy;
+  if (text !== undefined) setStatus(text, isBusy ? "busy" : "ok");
+  updateActionState();
+}
+
+function sanitizeBaseName(value, fallback = "meshport-model") {
   const clean = String(value ?? "")
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
     .replace(/[. ]+$/g, "")
@@ -104,11 +123,15 @@ function sanitizeBaseName(value, fallback = "tripo-model") {
 }
 
 function baseNameFromUrl(value) {
-  return sanitizeBaseName(tripoFileStem(value), "tripo-model");
+  return sanitizeBaseName(tripoFileStem(value), "meshport-model");
 }
 
 function currentBaseName(url) {
   return sanitizeBaseName(baseNameInput.value, baseNameFromUrl(url));
+}
+
+function currentFormat() {
+  return document.querySelector('input[name="format"]:checked')?.value || "stl";
 }
 
 function loadPreferences() {
@@ -123,7 +146,7 @@ function loadPreferences() {
 function savePreferences() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      format: formatSelect.value,
+      format: currentFormat(),
       png: pngCheckbox.checked,
     }));
   } catch {
@@ -228,21 +251,74 @@ async function getLinksFromActiveTab() {
     .slice(0, 50);
 }
 
+function selectModel(url, focus = false) {
+  if (!url) return;
+  const changed = url !== selectedUrl;
+  selectedUrl = url;
+
+  for (const button of linksList.querySelectorAll(".model")) {
+    const isSelected = button.dataset.url === url;
+    button.setAttribute("aria-selected", String(isSelected));
+    button.tabIndex = isSelected ? 0 : -1;
+    if (isSelected && focus) button.focus();
+  }
+
+  baseNameInput.value = baseNameFromUrl(url);
+  if (changed) {
+    inspectedKey = "";
+    lastPreviews = [];
+    clearTextures();
+  }
+  updateActionState();
+}
+
 function fillLinks(entries) {
-  linksSelect.replaceChildren();
+  selectedUrl = "";
+  linksList.replaceChildren();
+  modelCount.textContent = String(entries.length);
+
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No Tripo model yet. Open one in Tripo Studio, then rescan.";
+    linksList.append(empty);
+    updateActionState();
+    return;
+  }
+
   for (const entry of entries) {
-    const option = document.createElement("option");
-    option.value = entry.url;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "model";
+    button.dataset.url = entry.url;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "false");
+    button.tabIndex = -1;
+
     const stem = tripoFileStem(entry.url) || "tripo-model";
-    option.textContent = entry.capturedAt
-      ? `${stem} (${formatAge(Date.now() - entry.capturedAt)})`
-      : stem;
-    linksSelect.append(option);
+    button.title = stem;
+
+    const glyph = document.createElement("span");
+    glyph.className = "model-glyph";
+    glyph.innerHTML = MODEL_GLYPH;
+
+    const text = document.createElement("span");
+    text.className = "model-text";
+    const name = document.createElement("span");
+    name.className = "model-name";
+    name.textContent = stem;
+    const meta = document.createElement("span");
+    meta.className = "model-meta";
+    meta.textContent = entry.capturedAt
+      ? `Seen ${formatAge(Date.now() - entry.capturedAt)}`
+      : "Detected in this tab";
+    text.append(name, meta);
+
+    button.append(glyph, text);
+    linksList.append(button);
   }
-  if (entries.length) {
-    linksSelect.selectedIndex = 0;
-    baseNameInput.value = baseNameFromUrl(entries[0].url);
-  }
+
+  selectModel(entries[0].url);
 }
 
 function downloadBlob(blob, filename) {
@@ -393,7 +469,7 @@ function renderTextures(stats, previews) {
 }
 
 function updateFormatUi() {
-  const format = formatSelect.value;
+  const format = currentFormat();
   convertButton.textContent = FORMAT_LABELS[format] || "Download";
   const pngApplies = format === "obj" || format === "gltf";
   pngCheckbox.disabled = !pngApplies;
@@ -402,14 +478,17 @@ function updateFormatUi() {
 
 async function scan() {
   try {
-    setBusy(true, "Searching for Tripo GLB files in the current tab...");
+    setBusy(true, "Searching this tab for Tripo models...");
     const links = await getLinksFromActiveTab();
     fillLinks(links);
-    statusEl.textContent = links.length
-      ? `${links.length} Tripo GLB file(s) found.`
-      : "No Tripo GLB found. Open a model in Tripo Studio and try again.";
+    setStatus(
+      links.length
+        ? `${links.length} model${links.length === 1 ? "" : "s"} found.`
+        : "No Tripo model found. Open one in Tripo Studio and rescan.",
+      links.length ? "ok" : "idle",
+    );
   } catch (error) {
-    statusEl.textContent = `Scan error: ${error.message}`;
+    setStatus(`Scan error: ${error.message}`, "error");
   } finally {
     setBusy(false);
   }
@@ -417,24 +496,44 @@ async function scan() {
 
 scanButton.addEventListener("click", scan);
 
-formatSelect.addEventListener("change", () => {
-  updateFormatUi();
-  savePreferences();
+formatInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    updateFormatUi();
+    savePreferences();
+  });
 });
 
 pngCheckbox.addEventListener("change", savePreferences);
 
-linksSelect.addEventListener("change", () => {
-  inspectedKey = "";
-  lastPreviews = [];
-  baseNameInput.value = baseNameFromUrl(linksSelect.value);
-  clearTextures();
+textureBox.addEventListener("toggle", () => {
+  if (textureBox.open) textureBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
+});
+
+linksList.addEventListener("click", (event) => {
+  const button = event.target.closest(".model");
+  if (button) selectModel(button.dataset.url);
+});
+
+linksList.addEventListener("keydown", (event) => {
+  const buttons = [...linksList.querySelectorAll(".model")];
+  const index = buttons.indexOf(document.activeElement);
+  if (index < 0) return;
+
+  let next = null;
+  if (event.key === "ArrowDown") next = Math.min(index + 1, buttons.length - 1);
+  if (event.key === "ArrowUp") next = Math.max(index - 1, 0);
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = buttons.length - 1;
+  if (next === null) return;
+
+  event.preventDefault();
+  selectModel(buttons[next].dataset.url, true);
 });
 
 inspectButton.addEventListener("click", async () => {
-  const url = linksSelect.value;
+  const url = selectedUrl;
   if (!url) {
-    statusEl.textContent = "No Tripo GLB file selected.";
+    setStatus("No Tripo model selected.", "error");
     return;
   }
 
@@ -452,25 +551,26 @@ inspectButton.addEventListener("click", async () => {
     lastPreviews = response.previews || [];
     renderTextures(response.stats, lastPreviews);
     const summary = describeStats(response.stats);
-    statusEl.textContent = summary
-      ? `${summary}.`
-      : "No embedded textures found in this model.";
+    setStatus(
+      summary ? `${summary}.` : "No embedded textures found in this model.",
+      "ok",
+    );
   } catch (error) {
-    statusEl.textContent = `Error: ${error.message}`;
+    setStatus(`Error: ${error.message}`, "error");
   } finally {
     setBusy(false);
   }
 });
 
 convertButton.addEventListener("click", async () => {
-  const url = linksSelect.value;
+  const url = selectedUrl;
   if (!url) {
-    statusEl.textContent = "No Tripo GLB file selected.";
+    setStatus("No Tripo model selected.", "error");
     return;
   }
 
   try {
-    const format = formatSelect.value;
+    const format = currentFormat();
     setBusy(true, inspectedKey === url ? "Building output..." : "Downloading Tripo GLB...");
     const buffer = inspectedKey === url ? null : await fetchArrayBuffer(url);
     setBusy(true, FORMAT_PROGRESS[format] || "Converting...");
@@ -483,18 +583,25 @@ convertButton.addEventListener("click", async () => {
 
     if (textureBox.hidden) renderTextures(response.stats, lastPreviews);
     const summary = describeStats(response.stats);
-    statusEl.textContent = `${result.fileName} saved${summary ? ` · ${summary}` : ""}.`;
+    setStatus(
+      `${result.fileName} saved${summary ? ` · ${summary}` : ""}.`,
+      "ok",
+    );
   } catch (error) {
-    statusEl.textContent = `Error: ${error.message}`;
+    setStatus(`Error: ${error.message}`, "error");
   } finally {
     setBusy(false);
   }
 });
 
 const preferences = loadPreferences();
-if (preferences.format && FORMAT_LABELS[preferences.format]) formatSelect.value = preferences.format;
+if (preferences.format) {
+  const input = formatInputs.find((entry) => entry.value === preferences.format);
+  if (input) input.checked = true;
+}
 if (typeof preferences.png === "boolean") pngCheckbox.checked = preferences.png;
 updateFormatUi();
+updateActionState();
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", scan);
 } else {

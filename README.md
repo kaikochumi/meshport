@@ -1,52 +1,55 @@
-# Tripo To STL
+# Meshport
 
-Tripo To STL is a Chrome extension for models you open in Tripo Studio. It catches the GLB the page downloads, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, or a folder of textures.
+Meshport is a browser extension that exports models from Tripo Studio. It catches the GLB the page loads, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, or a folder of textures.
 
-Tripo serves models as GLB files compressed with `EXT_meshopt_compression` and quantized with `KHR_mesh_quantization`. The extension removes both before exporting, so the result opens in Blender, PrusaSlicer, and other tools that do not support those extensions.
+![Meshport popup](docs/popup.png)
 
-## Requirements
+Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`. Blender, PrusaSlicer, and other tools do not open those files. Meshport removes both extensions before it writes the output, so the result opens elsewhere.
 
-Google Chrome, Microsoft Edge, or another Chromium browser. No account setup and no server. The decoder ships inside `chrome-extension/vendor`, so there is nothing to build before loading the extension.
+## Install
 
-## Installation
+Meshport is not on the Chrome Web Store. Load it from the folder:
 
-1. Open the extensions page: `chrome://extensions` in Chrome, `edge://extensions` in Edge.
-2. Turn on `Developer mode`.
-3. Click `Load unpacked`.
-4. Pick the `chrome-extension` folder inside this project.
+1. Download or clone this repository.
+2. Open `chrome://extensions` in Chrome or `edge://extensions` in Edge.
+3. Turn on `Developer mode`.
+4. Click `Load unpacked` and select the `chrome-extension` folder.
+5. Pin Meshport to the toolbar if the icon is hidden.
+
+To update, replace the folder and click the reload button on the extensions page.
 
 ## Usage
 
 1. Open a model in Tripo Studio.
-2. Reload the page if the extension was installed after the model loaded. It only sees requests made while it is running.
-3. Click the Tripo To STL icon.
-4. Pick one of the detected GLB files. The newest model stays at the top of the list.
-5. Change the file name if you want.
-6. Pick a format and click the download button.
+2. Reload the page if you installed the extension after the model loaded. It only sees requests made while it runs.
+3. Click the Meshport icon. The popup lists the models it found in the tab, newest first.
+4. Pick a model, change the file name if you want, and choose a format.
+5. Click the download button.
 
-`Inspect textures` shows the maps and their sizes before you download anything.
+`Inspect` decodes the model without saving it and shows the textures, their sizes, and the triangle count.
 
-Tripo links are signed and stop working after a few minutes. If the extension reports a 403, reload the model page and try again.
+Tripo links are signed and expire after a few minutes. If Meshport reports a 403, reload the model page and try again.
 
-## Output formats
+## Formats
 
-| Format | What you get |
+| Format | Files |
 | --- | --- |
-| STL | Binary STL with geometry only. STL cannot store textures. |
-| OBJ + textures | A `.zip` with the `.obj`, an `.mtl`, and a `textures/` folder. |
-| glTF + textures | A `.zip` with the `.gltf`, its `.bin`, and a `textures/` folder. |
-| GLB | The decoded model as one GLB, without meshopt or quantization. |
-| Textures only | A `.zip` with every embedded texture. |
+| STL | Binary STL with geometry only. |
+| OBJ | A zip with the `.obj`, `.mtl`, and a `textures` folder. |
+| glTF | A zip with the `.gltf`, `.bin`, and a `textures` folder. |
+| GLB | One decoded GLB, without meshopt or quantization. |
+| Textures | A zip with every embedded texture. |
+
+STL cannot store textures. Use OBJ or glTF when you need the maps.
 
 ## Notes
 
-- Everything runs inside the extension. Model data never leaves the browser.
-- Textures keep their original format unless `Convert textures to PNG` is checked. PNG opens in more editors and takes more space.
-- OBJ export writes UVs and an `.mtl` that points at the exported images. It also applies the UV set and `KHR_texture_transform` declared by each material.
-- The popup remembers the format and the PNG setting between sessions. The file name is not remembered because it belongs to the model you picked.
-- Tripo limits exports on some plans. Download only models you have the right to use.
-- The extension is not on the Chrome Web Store. Update it by replacing the folder and clicking reload on the extensions page.
-- The GLB export is the decoded model. Nothing is re-encoded.
+- Everything runs in the extension. Models and textures never leave the browser.
+- Textures keep their original format unless `Convert textures to PNG` is on. PNG opens in more editors and takes more space.
+- OBJ export writes UVs, a material library, and applies the `KHR_texture_transform` declared by each material.
+- The popup remembers the format and the PNG setting. It does not remember the file name because that belongs to the model.
+- The GLB export is decoded, not re-encoded.
+- Download only models you have the right to use.
 
 ## Development
 
@@ -55,7 +58,7 @@ npm install
 npm test
 ```
 
-The suite covers the GLB parser, texture extraction, OBJ/MTL output, the ZIP writer, the glTF package builder, and the meshopt decode path. It runs against `test/fixtures/cube-meshopt.glb`, a small cube compressed with `gltfpack -cc`.
+The suite covers the GLB parser, texture extraction, OBJ and MTL output, the zip writer, the glTF package builder, and the meshopt decode path. It runs against `test/fixtures/cube-meshopt.glb`, a cube compressed with `gltfpack -cc`.
 
 Rebuild the decoder bundle after upgrading glTF Transform or meshoptimizer:
 
@@ -63,10 +66,14 @@ Rebuild the decoder bundle after upgrading glTF Transform or meshoptimizer:
 npm run build:vendor
 ```
 
-Regenerate the test fixture:
+Regenerate the fixture:
 
 ```bash
 npm run make:fixture
 ```
 
-`chrome-extension/vendor/tripo_loader.js` is generated from `tools/vendor-entry.js` and bundles `@gltf-transform/core`, `@gltf-transform/extensions`, and the meshoptimizer decoder. Licenses are listed in `THIRD_PARTY_NOTICES.md`.
+`chrome-extension/vendor/tripo_loader.js` is generated from `tools/vendor-entry.js` and bundles `@gltf-transform/core`, `@gltf-transform/extensions`, and the meshoptimizer decoder. Licenses are in `THIRD_PARTY_NOTICES.md`.
+
+## Credits
+
+The exporters started in [Meshy AI to STL](https://github.com/ChesterTheCatt/meshy-ai-to-stl) and were adapted for Tripo Studio. [@ChesterTheCatt](https://github.com/ChesterTheCatt) wrote the original extension.

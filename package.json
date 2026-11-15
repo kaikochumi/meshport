@@ -1,9 +1,9 @@
 {
-  "name": "tripo-ai-to-stl",
-  "version": "0.1.1",
+  "name": "meshport",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Chrome extension that finds Tripo Studio GLB models in the current tab and converts them to STL, OBJ, glTF, GLB, or textures.",
+  "description": "Browser extension that exports Tripo Studio models to STL, OBJ, glTF, GLB, or textures.",
   "scripts": {
     "build:vendor": "node tools/build-vendor.mjs",
     "make:fixture": "node tools/make-fixture.mjs",
