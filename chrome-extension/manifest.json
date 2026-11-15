@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Tripo To STL",
+  "version": "0.1.0",
+  "description": "Finds Tripo Studio GLB models in the current tab and converts them to STL, OBJ, glTF, GLB, or textures.",
+  "action": {
+    "default_title": "Tripo To STL",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "scripting",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "*://tripo3d.ai/*",
+    "*://*.tripo3d.ai/*",
+    "*://tripo3d.com/*",
+    "*://*.tripo3d.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://tripo3d.ai/*",
+        "*://*.tripo3d.ai/*"
+      ],
+      "js": [
+        "shared.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "sandbox": {
+    "pages": [
+      "sandbox.html"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts allow-downloads; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; child-src 'self'"
+  }
+}
