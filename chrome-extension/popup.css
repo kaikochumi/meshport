@@ -350,13 +350,41 @@ h2 {
 }
 
 .empty {
-  padding: 11px 10px;
+  display: grid;
+  gap: 9px;
+  justify-items: center;
+  padding: 12px 11px;
   border: 1px dashed var(--line-strong);
   border-radius: 8px;
   color: var(--dim);
   font-size: 11px;
   line-height: 1.45;
   text-align: center;
+}
+
+.empty p {
+  margin: 0;
+}
+
+.empty-reload {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .2s, background .2s, color .2s, transform .15s;
+}
+
+.empty-reload:hover {
+  border-color: rgba(201, 247, 90, .45);
+  background: rgba(201, 247, 90, .08);
+  color: var(--lime);
+  transform: translateY(-1px);
 }
 
 .field {

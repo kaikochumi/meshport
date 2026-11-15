@@ -265,11 +265,27 @@ function scanPageForTripoLinks() {
     add(el.getAttribute("data-url"));
     add(el.getAttribute("data-model-url"));
   });
-  for (const match of document.documentElement.innerHTML.matchAll(/https?:\/\/[^"'<>\\\s]+\.glb[^"'<>\\\s]*/gi)) {
+  const html = document.documentElement.innerHTML.replaceAll("\\/", "/");
+  for (const match of html.matchAll(/https?:\/\/[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
+    add(match[0]);
+  }
+  for (const match of html.matchAll(/[^"'<>\s]*tripo_pbr_model_[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
     add(match[0]);
   }
 
   return [...urls].slice(0, 50);
+}
+
+async function scanPageInTab(tabId, add) {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: scanPageForTripoLinks,
+    });
+    for (const link of result?.result || []) add(link);
+  } catch {
+    // The tab may not allow injection.
+  }
 }
 
 async function getActiveTab() {
@@ -310,12 +326,9 @@ async function getLinksFromActiveTab() {
   try {
     const response = await chrome.tabs.sendMessage(tab.id, { type: "scan-tripo-links" });
     for (const link of response?.links || []) add(link);
+    if (!response?.links?.length) await scanPageInTab(tab.id, add);
   } catch {
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: scanPageForTripoLinks,
-    });
-    for (const link of result?.result || []) add(link);
+    await scanPageInTab(tab.id, add);
   }
 
   return [...all.values()]
@@ -356,9 +369,16 @@ function fillLinks(entries) {
   modelCount.textContent = String(entries.length);
 
   if (!entries.length) {
-    const empty = document.createElement("p");
+    const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "No Tripo model yet. Open one in Tripo Studio, then rescan.";
+    const text = document.createElement("p");
+    text.textContent = "No model captured yet. If the model was already open, reload the tab so Meshport can see it load.";
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.className = "empty-reload";
+    reload.dataset.action = "reload-tab";
+    reload.textContent = "Reload tab";
+    empty.append(text, reload);
     linksList.append(empty);
     updateActionState();
     return;
@@ -599,13 +619,30 @@ async function scan() {
     setStatus(
       links.length
         ? `${links.length} model${links.length === 1 ? "" : "s"} found.`
-        : "No Tripo model found. Open one in Tripo Studio and rescan.",
+        : "No Tripo model found. Reload the tab, let the model load, then rescan.",
       links.length ? "ok" : "idle",
     );
   } catch (error) {
     setStatus(`Scan error: ${error.message}`, "error");
   } finally {
     setBusy(false);
+  }
+}
+
+async function reloadActiveTab() {
+  try {
+    const tab = await getActiveTab();
+    setStatus("Reloading the tab. The model is captured when it loads again.", "busy");
+    await chrome.tabs.reload(tab.id);
+    const onUpdated = (tabId, info) => {
+      if (tabId !== tab.id || info.status !== "complete") return;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      setTimeout(() => scanButton.click(), 1200);
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    setTimeout(() => chrome.tabs.onUpdated.removeListener(onUpdated), 30000);
+  } catch (error) {
+    setStatus(`Reload failed: ${error.message}`, "error");
   }
 }
 
@@ -626,7 +663,11 @@ textureBox.addEventListener("toggle", () => {
 
 linksList.addEventListener("click", (event) => {
   const button = event.target.closest(".model");
-  if (button) selectModel(button.dataset.url);
+  if (button) {
+    selectModel(button.dataset.url);
+    return;
+  }
+  if (event.target.closest('[data-action="reload-tab"]')) reloadActiveTab();
 });
 
 linksList.addEventListener("keydown", (event) => {

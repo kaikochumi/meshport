@@ -22,7 +22,11 @@ function collectTripoLinks() {
     add(el.getAttribute("data-model-url"));
   });
 
-  for (const match of document.documentElement.innerHTML.matchAll(/https?:\/\/[^"'<>\\\s]+\.glb[^"'<>\\\s]*/gi)) {
+  const html = document.documentElement.innerHTML.replaceAll("\\/", "/");
+  for (const match of html.matchAll(/https?:\/\/[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
+    add(match[0]);
+  }
+  for (const match of html.matchAll(/[^"'<>\s]*tripo_pbr_model_[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
     add(match[0]);
   }
 
