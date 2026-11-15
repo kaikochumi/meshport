@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Meshport",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Export Tripo Studio models to STL, OBJ, glTF, GLB, or textures. Everything runs in your browser.",
   "homepage_url": "https://github.com/kaikochumi/meshport",
   "icons": {
@@ -32,6 +32,17 @@
     "*://*.tripo3d.com/*"
   ],
   "content_scripts": [
+    {
+      "matches": [
+        "*://tripo3d.ai/*",
+        "*://*.tripo3d.ai/*"
+      ],
+      "js": [
+        "main-world.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "*://tripo3d.ai/*",

@@ -30,94 +30,144 @@
         </button>
       </header>
 
-      <section>
-        <div class="section-head">
-          <h2>Model</h2>
-          <span id="model-count" class="count">0</span>
-        </div>
-        <div id="links" class="models" role="listbox" aria-label="Detected Tripo models">
-          <p class="empty">Scanning this tab...</p>
-        </div>
-      </section>
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button id="tab-export" class="tab" type="button" role="tab" aria-selected="true" aria-controls="view-export">Export</button>
+        <button id="tab-settings" class="tab" type="button" role="tab" aria-selected="false" aria-controls="view-settings">Settings</button>
+      </nav>
 
-      <div class="field">
-        <label for="base-name">File name</label>
-        <input id="base-name" type="text" placeholder="model" autocomplete="off" spellcheck="false">
+      <div id="view-export" class="view" role="tabpanel" aria-labelledby="tab-export">
+        <section>
+          <div class="section-head">
+            <h2>Model</h2>
+            <span id="model-count" class="count">0</span>
+          </div>
+          <div id="links" class="models" role="listbox" aria-label="Detected Tripo models">
+            <p class="empty">Scanning this tab...</p>
+          </div>
+        </section>
+
+        <div class="field">
+          <label for="base-name">File name</label>
+          <input id="base-name" type="text" placeholder="model" autocomplete="off" spellcheck="false">
+        </div>
+
+        <section>
+          <div class="section-head">
+            <h2>Format</h2>
+          </div>
+          <div class="formats" role="radiogroup" aria-label="Output format">
+            <label class="format" title="Geometry only. No color or textures. Best for 3D printing.">
+              <input type="radio" name="format" value="stl" checked>
+              <span class="format-body">
+                <strong>STL</strong>
+                <small>Mesh only, for slicers</small>
+              </span>
+            </label>
+            <label class="format" title="Zipped OBJ with a material file and textures. Opens in most 3D tools.">
+              <input type="radio" name="format" value="obj">
+              <span class="format-body">
+                <strong>OBJ</strong>
+                <small>Mesh, MTL and textures</small>
+              </span>
+            </label>
+            <label class="format" title="Zipped .gltf, .bin and textures. The modern scene format.">
+              <input type="radio" name="format" value="gltf">
+              <span class="format-body">
+                <strong>glTF</strong>
+                <small>Separate files + textures</small>
+              </span>
+            </label>
+            <label class="format" title="Single binary file with geometry and textures inside.">
+              <input type="radio" name="format" value="glb">
+              <span class="format-body">
+                <strong>GLB</strong>
+                <small>One file with everything</small>
+              </span>
+            </label>
+            <label class="format wide" title="Base color, normal and other maps, without the mesh.">
+              <input type="radio" name="format" value="textures">
+              <span class="format-body">
+                <strong>Textures only</strong>
+                <small>Every map in one zip</small>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <label class="switch-row" id="png-row">
+          <span class="switch-text">
+            <strong>Convert textures to PNG</strong>
+            <small>Used by OBJ and glTF</small>
+          </span>
+          <input id="png" type="checkbox" checked>
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+
+        <details id="texture-box" class="textures" hidden>
+          <summary>
+            <span id="texture-summary">Textures</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </summary>
+          <ul id="texture-list"></ul>
+        </details>
+
+        <footer>
+          <div class="status-row">
+            <span class="dot" aria-hidden="true"></span>
+            <p id="status">Ready.</p>
+          </div>
+          <progress id="progress" hidden></progress>
+          <div class="actions">
+            <button id="inspect" class="ghost" type="button">Inspect</button>
+            <button id="convert" type="button">Download STL</button>
+          </div>
+        </footer>
       </div>
 
-      <section>
-        <div class="section-head">
-          <h2>Format</h2>
-        </div>
-        <div class="formats" role="radiogroup" aria-label="Output format">
-          <label class="format">
-            <input type="radio" name="format" value="stl" checked>
-            <span class="format-body">
-              <strong>STL</strong>
-              <small>3D printing</small>
+      <div id="view-settings" class="view" role="tabpanel" aria-labelledby="tab-settings" hidden>
+        <section class="setting">
+          <div class="section-head">
+            <h2>Save location</h2>
+          </div>
+          <label class="switch-row" id="ask-save-row">
+            <span class="switch-text">
+              <strong>Ask where to save</strong>
+              <small>Choose any folder for each download.</small>
             </span>
+            <input id="ask-save" type="checkbox">
+            <span class="switch" aria-hidden="true"></span>
           </label>
-          <label class="format">
-            <input type="radio" name="format" value="obj">
-            <span class="format-body">
-              <strong>OBJ</strong>
-              <small>Mesh + textures</small>
-            </span>
-          </label>
-          <label class="format">
-            <input type="radio" name="format" value="gltf">
-            <span class="format-body">
-              <strong>glTF</strong>
-              <small>Scene + textures</small>
-            </span>
-          </label>
-          <label class="format">
-            <input type="radio" name="format" value="glb">
-            <span class="format-body">
-              <strong>GLB</strong>
-              <small>Clean single file</small>
-            </span>
-          </label>
-          <label class="format wide">
-            <input type="radio" name="format" value="textures">
-            <span class="format-body">
-              <strong>Textures only</strong>
-              <small>Every map in one zip</small>
-            </span>
-          </label>
-        </div>
-      </section>
+          <div class="field" id="folder-field">
+            <label for="subfolder">Subfolder in Downloads</label>
+            <input id="subfolder" type="text" placeholder="Meshport" autocomplete="off" spellcheck="false">
+            <p class="hint">The browser can only write inside Downloads. Leave it empty to save at the root.</p>
+          </div>
+        </section>
 
-      <label class="switch-row" id="png-row">
-        <span class="switch-text">
-          <strong>Convert textures to PNG</strong>
-          <small>Used by OBJ and glTF</small>
-        </span>
-        <input id="png" type="checkbox" checked>
-        <span class="switch" aria-hidden="true"></span>
-      </label>
+        <section class="setting">
+          <div class="section-head">
+            <h2>Default format</h2>
+          </div>
+          <div class="chips" id="default-formats" role="radiogroup" aria-label="Default output format">
+            <label class="chip"><input type="radio" name="default-format" value="stl" checked><span>STL</span></label>
+            <label class="chip"><input type="radio" name="default-format" value="obj"><span>OBJ</span></label>
+            <label class="chip"><input type="radio" name="default-format" value="gltf"><span>glTF</span></label>
+            <label class="chip"><input type="radio" name="default-format" value="glb"><span>GLB</span></label>
+            <label class="chip"><input type="radio" name="default-format" value="textures"><span>Textures</span></label>
+          </div>
+          <p class="hint">The Export tab starts with this format.</p>
+        </section>
 
-      <details id="texture-box" class="textures" hidden>
-        <summary>
-          <span id="texture-summary">Textures</span>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </summary>
-        <ul id="texture-list"></ul>
-      </details>
-
-      <footer>
-        <div class="status-row">
-          <span class="dot" aria-hidden="true"></span>
-          <p id="status">Ready.</p>
-        </div>
-        <progress id="progress" hidden></progress>
-        <div class="actions">
-          <button id="inspect" class="ghost" type="button">Inspect</button>
-          <button id="convert" type="button">Download STL</button>
-        </div>
-      </footer>
+        <section class="setting about">
+          <div class="section-head">
+            <h2>About</h2>
+          </div>
+          <p>Meshport <span id="version">0.2.2</span>. Built by <a href="https://github.com/kaikochumi" target="_blank" rel="noreferrer">@kaikochumi</a>.</p>
+          <p>Tripo links expire after a few minutes, so download soon after the model loads.</p>
+        </section>
+      </div>
     </main>
 
     <iframe id="sandbox" src="sandbox.html" hidden></iframe>

@@ -13,6 +13,15 @@ const sandboxFrame = document.getElementById("sandbox");
 const textureBox = document.getElementById("texture-box");
 const textureSummary = document.getElementById("texture-summary");
 const textureList = document.getElementById("texture-list");
+const tabExport = document.getElementById("tab-export");
+const tabSettings = document.getElementById("tab-settings");
+const viewExport = document.getElementById("view-export");
+const viewSettings = document.getElementById("view-settings");
+const askSaveCheckbox = document.getElementById("ask-save");
+const folderField = document.getElementById("folder-field");
+const subfolderInput = document.getElementById("subfolder");
+const defaultFormatInputs = [...document.querySelectorAll('input[name="default-format"]')];
+const versionEl = document.getElementById("version");
 
 const FORMAT_LABELS = {
   stl: "Download STL",
@@ -41,6 +50,7 @@ const FORMAT_SAVE = {
 const MODEL_GLYPH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5 12 12 4 7.5Z" fill="currentColor"/><path d="M4 9 11 13v8L4 17Z" fill="currentColor" opacity=".55"/><path d="M20 9 13 13v8l7-4Z" fill="currentColor" opacity=".8"/></svg>';
 
 const PREFS_KEY = "meshport/preferences";
+const SETTINGS_KEY = "meshport/settings/v1";
 const THUMB_KEY = "meshport/thumbnails/v1";
 const THUMB_LIMIT = 24;
 
@@ -52,6 +62,7 @@ let previewUrls = [];
 let lastPreviews = [];
 let sandboxReadyPromise = null;
 let thumbnailCache = loadThumbnailCache();
+let settings = loadSettings();
 let thumbnailQueue = Promise.resolve();
 let thumbnailObserver = null;
 let idleWaiters = [];
@@ -231,6 +242,60 @@ function savePreferences() {
   }
 }
 
+function loadSettings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+    return {
+      askSave: false,
+      subfolder: "",
+      ...(parsed && typeof parsed === "object" ? parsed : {}),
+    };
+  } catch {
+    return { askSave: false, subfolder: "" };
+  }
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // Settings are optional.
+  }
+}
+
+function cleanSubfolder(value) {
+  return String(value || "")
+    .split(/[\\/]+/)
+    .map((part) => part.trim().replace(/[<>:"|?*\u0000-\u001f]/g, "").replace(/[. ]+$/, ""))
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/")
+    .slice(0, 120);
+}
+
+function downloadPath(filename) {
+  const folder = settings.askSave ? "" : cleanSubfolder(settings.subfolder);
+  return folder ? `${folder}/${filename}` : filename;
+}
+
+function syncSettingsUi() {
+  askSaveCheckbox.checked = Boolean(settings.askSave);
+  subfolderInput.value = settings.subfolder || "";
+  subfolderInput.disabled = Boolean(settings.askSave);
+  folderField.classList.toggle("disabled", Boolean(settings.askSave));
+}
+
+function showView(name) {
+  const isSettings = name === "settings";
+  viewExport.hidden = isSettings;
+  viewSettings.hidden = !isSettings;
+  tabExport.setAttribute("aria-selected", String(!isSettings));
+  tabSettings.setAttribute("aria-selected", String(isSettings));
+  tabExport.tabIndex = isSettings ? -1 : 0;
+  tabSettings.tabIndex = isSettings ? 0 : -1;
+  document.body.classList.toggle("settings-open", isSettings);
+  document.querySelector("main").scrollTop = 0;
+}
+
 function scanPageForTripoLinks() {
   const urls = new Set();
   const isGlb = (value) => {
@@ -241,7 +306,9 @@ function scanPageForTripoLinks() {
         host !== "tripo3d.ai" && !host.endsWith(".tripo3d.ai")
         && host !== "tripo3d.com" && !host.endsWith(".tripo3d.com")
       ) return false;
-      return /\.glb$/i.test(url.pathname);
+      if (!/\.glb$/i.test(url.pathname)) return false;
+      const name = decodeURIComponent(url.pathname.split("/").pop() || "");
+      return /^tripo_(?:[a-z0-9]+_)*model_/i.test(name);
     } catch {
       return false;
     }
@@ -265,11 +332,10 @@ function scanPageForTripoLinks() {
     add(el.getAttribute("data-url"));
     add(el.getAttribute("data-model-url"));
   });
-  const html = document.documentElement.innerHTML.replaceAll("\\/", "/");
+  const html = document.documentElement.innerHTML
+    .replaceAll("\\/", "/")
+    .replace(/\\u002f/gi, "/");
   for (const match of html.matchAll(/https?:\/\/[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
-    add(match[0]);
-  }
-  for (const match of html.matchAll(/[^"'<>\s]*tripo_pbr_model_[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
     add(match[0]);
   }
 
@@ -322,6 +388,7 @@ async function getLinksFromActiveTab() {
 
   const remembered = await chrome.runtime.sendMessage({ type: "get-tripo-requests", tabId: tab.id }).catch(() => null);
   for (const entry of remembered?.entries || []) add(entry.url, entry.capturedAt || 0);
+  for (const entry of remembered?.recent || []) add(entry.url, entry.capturedAt || 0);
 
   try {
     const response = await chrome.tabs.sendMessage(tab.id, { type: "scan-tripo-links" });
@@ -364,6 +431,7 @@ function selectModel(url, focus = false) {
 
 function fillLinks(entries) {
   const token = ++scanToken;
+  entries = entries.filter((entry) => isTripoGlbUrl(entry.url));
   selectedUrl = "";
   linksList.replaceChildren();
   modelCount.textContent = String(entries.length);
@@ -463,7 +531,12 @@ function downloadBlob(blob, filename) {
       URL.revokeObjectURL(objectUrl);
       reject(new Error("The download did not start. Try again."));
     }, 30000);
-    chrome.downloads.download({ url: objectUrl, filename, conflictAction: "uniquify", saveAs: false }, (downloadId) => {
+    chrome.downloads.download({
+      url: objectUrl,
+      filename: downloadPath(filename),
+      conflictAction: "uniquify",
+      saveAs: Boolean(settings.askSave),
+    }, (downloadId) => {
       clearTimeout(timer);
       const error = chrome.runtime.lastError;
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
@@ -648,11 +721,49 @@ async function reloadActiveTab() {
 
 scanButton.addEventListener("click", scan);
 
+function setFormat(value) {
+  const input = formatInputs.find((entry) => entry.value === value);
+  if (!input) return;
+  input.checked = true;
+  const chip = defaultFormatInputs.find((entry) => entry.value === value);
+  if (chip) chip.checked = true;
+  updateFormatUi();
+  savePreferences();
+}
+
 formatInputs.forEach((input) => {
-  input.addEventListener("change", () => {
-    updateFormatUi();
-    savePreferences();
+  input.addEventListener("change", () => setFormat(input.value));
+});
+
+defaultFormatInputs.forEach((input) => {
+  input.addEventListener("change", () => setFormat(input.value));
+});
+
+tabExport.addEventListener("click", () => showView("export"));
+tabSettings.addEventListener("click", () => showView("settings"));
+[tabExport, tabSettings].forEach((tab) => {
+  tab.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const nextTab = tab === tabExport ? tabSettings : tabExport;
+    showView(nextTab === tabSettings ? "settings" : "export");
+    nextTab.focus();
   });
+});
+
+askSaveCheckbox.addEventListener("change", () => {
+  settings.askSave = askSaveCheckbox.checked;
+  saveSettings();
+  syncSettingsUi();
+});
+
+subfolderInput.addEventListener("input", () => {
+  settings.subfolder = cleanSubfolder(subfolderInput.value);
+  saveSettings();
+});
+
+subfolderInput.addEventListener("blur", () => {
+  subfolderInput.value = settings.subfolder;
 });
 
 pngCheckbox.addEventListener("change", savePreferences);
@@ -751,12 +862,11 @@ convertButton.addEventListener("click", async () => {
 });
 
 const preferences = loadPreferences();
-if (preferences.format) {
-  const input = formatInputs.find((entry) => entry.value === preferences.format);
-  if (input) input.checked = true;
-}
+setFormat(preferences.format || "stl");
 if (typeof preferences.png === "boolean") pngCheckbox.checked = preferences.png;
-updateFormatUi();
+syncSettingsUi();
+versionEl.textContent = chrome.runtime.getManifest().version;
+showView("export");
 updateActionState();
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", scan);

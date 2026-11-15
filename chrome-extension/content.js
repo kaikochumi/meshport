@@ -1,7 +1,8 @@
 const reported = new Set();
+const liveUrls = new Set();
 
 function collectTripoLinks() {
-  const urls = new Set();
+  const urls = new Set(liveUrls);
   const add = (value) => {
     if (!value || typeof value !== "string") return;
     try {
@@ -22,11 +23,10 @@ function collectTripoLinks() {
     add(el.getAttribute("data-model-url"));
   });
 
-  const html = document.documentElement.innerHTML.replaceAll("\\/", "/");
+  const html = document.documentElement.innerHTML
+    .replaceAll("\\/", "/")
+    .replace(/\\u002f/gi, "/");
   for (const match of html.matchAll(/https?:\/\/[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
-    add(match[0]);
-  }
-  for (const match of html.matchAll(/[^"'<>\s]*tripo_pbr_model_[^"'<>\s]+\.glb[^"'<>\s]*/gi)) {
     add(match[0]);
   }
 
@@ -63,6 +63,19 @@ if (typeof PerformanceObserver === "function") {
     // The popup still scans the page on demand.
   }
 }
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== "meshport" || data.type !== "model-url") return;
+  if (typeof data.url !== "string") return;
+  const url = data.url.split("#")[0];
+  if (!isTripoGlbUrl(url)) return;
+  liveUrls.add(url);
+  report([url]);
+});
+
+window.postMessage({ source: "meshport-content", type: "ready" }, "*");
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "scan-tripo-links") return;

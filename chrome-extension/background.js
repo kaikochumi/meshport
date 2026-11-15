@@ -1,15 +1,36 @@
 importScripts("shared.js");
 
 const tabTripoRequests = new Map();
+const recentModels = [];
 const STORAGE_PREFIX = "tripo-tab-";
+const RECENT_KEY = "tripo-recent";
 const MAX_ENTRIES = 20;
+const RECENT_LIMIT = 30;
+const RECENT_TTL = 30 * 60 * 1000;
 
 function storageKey(tabId) {
   return `${STORAGE_PREFIX}${tabId}`;
 }
 
+function pruneRecent(list) {
+  const cutoff = Date.now() - RECENT_TTL;
+  return list.filter((entry) => entry?.url && (entry.capturedAt || 0) >= cutoff);
+}
+
+function rememberRecent(url) {
+  if (!isTripoGlbUrl(url)) return;
+  const index = recentModels.findIndex((entry) => entry.url === url);
+  if (index >= 0) recentModels.splice(index, 1);
+  recentModels.unshift({ url, capturedAt: Date.now() });
+  while (recentModels.length > RECENT_LIMIT) recentModels.pop();
+  chrome.storage.session.set({ [RECENT_KEY]: recentModels }).catch(() => {});
+}
+
 function remember(tabId, url) {
-  if (tabId < 0 || !isTripoGlbUrl(url)) return;
+  if (!isTripoGlbUrl(url)) return;
+  rememberRecent(url);
+  if (tabId < 0) return;
+
   const entries = tabTripoRequests.get(tabId) || [];
   if (entries.some((entry) => entry.url === url)) return;
 
@@ -33,6 +54,23 @@ async function getEntries(tabId) {
   }
 }
 
+async function getRecent() {
+  if (!recentModels.length) {
+    try {
+      const stored = await chrome.storage.session.get(RECENT_KEY);
+      recentModels.push(...pruneRecent(stored[RECENT_KEY] || []));
+    } catch {
+      return [];
+    }
+  }
+  const pruned = pruneRecent(recentModels);
+  if (pruned.length !== recentModels.length) {
+    recentModels.length = 0;
+    recentModels.push(...pruned);
+  }
+  return pruned;
+}
+
 function forget(tabId) {
   tabTripoRequests.delete(tabId);
   chrome.storage.session.remove(storageKey(tabId)).catch(() => {});
@@ -40,9 +78,8 @@ function forget(tabId) {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (details.tabId < 0) return;
     if (details.type === "main_frame") {
-      forget(details.tabId);
+      if (details.tabId >= 0) forget(details.tabId);
       return;
     }
     remember(details.tabId, details.url);
@@ -67,7 +104,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "get-tripo-requests" && Number.isInteger(message.tabId)) {
-    getEntries(message.tabId).then((entries) => sendResponse({ entries }));
+    Promise.all([getEntries(message.tabId), getRecent()])
+      .then(([entries, recent]) => sendResponse({ entries, recent }))
+      .catch(() => sendResponse({ entries: [], recent: [] }));
     return true;
   }
 });

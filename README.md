@@ -30,6 +30,8 @@ To update, replace the folder and click the reload button on the extensions page
 4. Pick a model, change the file name if you want, and choose a format.
 5. Click the download button.
 
+The Settings tab sets a subfolder inside Downloads, switches the download to ask for a folder each time, and picks the default format.
+
 `Inspect` decodes the model without saving it and shows the textures, their sizes, and the triangle count.
 
 Tripo links are signed and expire after a few minutes. If Meshport reports a 403, reload the model page and try again.
@@ -52,6 +54,7 @@ STL cannot store textures. Use OBJ or glTF when you need the maps.
 - Textures keep their original format unless `Convert textures to PNG` is on. PNG opens in more editors and takes more space.
 - OBJ export writes UVs, a material library, and applies the `KHR_texture_transform` declared by each material.
 - The popup remembers the format and the PNG setting. It does not remember the file name because that belongs to the model.
+- Browsers can only write inside the Downloads folder. The Settings tab can put files in a subfolder there, or ask where to save each download.
 - Previews are rendered locally and cached, so the popup opens faster the next time.
 - The GLB export is decoded, not re-encoded.
 - Download only models you have the right to use.

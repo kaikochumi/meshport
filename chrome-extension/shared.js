@@ -5,7 +5,9 @@ function isTripoGlbUrl(value) {
     const host = url.hostname.toLowerCase();
     const onTripo = host === "tripo3d.ai" || host.endsWith(".tripo3d.ai")
       || host === "tripo3d.com" || host.endsWith(".tripo3d.com");
-    return onTripo && /\.glb$/i.test(url.pathname);
+    if (!onTripo || !/\.glb$/i.test(url.pathname)) return false;
+    const name = decodeURIComponent(url.pathname.split("/").pop() || "");
+    return /^tripo_(?:[a-z0-9]+_)*model_/i.test(name);
   } catch {
     return false;
   }
