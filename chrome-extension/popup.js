@@ -1428,6 +1428,7 @@ function fillMeshyPlaceholder() {
 }
 
 function applyPlatform() {
+  document.body.dataset.platform = platform;
   for (const [name, button] of Object.entries(platformButtons)) {
     button.setAttribute("aria-pressed", String(name === platform));
   }
