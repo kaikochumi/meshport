@@ -34,6 +34,7 @@ const FORMAT_LABELS = {
   obj: "Download OBJ + textures",
   gltf: "Download glTF + textures",
   glb: "Download GLB",
+  fbx: "Download FBX",
   textures: "Download textures",
 };
 
@@ -42,6 +43,7 @@ const FORMAT_PROGRESS = {
   obj: "Building OBJ + textures...",
   gltf: "Building glTF + textures...",
   glb: "Cleaning GLB...",
+  fbx: "Fetching the Tripo file...",
   textures: "Extracting textures...",
 };
 
@@ -50,6 +52,7 @@ const FORMAT_SAVE = {
   obj: "Saving OBJ + textures...",
   gltf: "Saving glTF + textures...",
   glb: "Saving GLB...",
+  fbx: "Saving FBX...",
   textures: "Saving textures...",
 };
 
@@ -79,8 +82,22 @@ let thumbnailQueue = Promise.resolve();
 let thumbnailObserver = null;
 let currentModelEntries = [];
 let capturedModels = [];
+let learnedOperators = {};
 let idleWaiters = [];
 let scanToken = 0;
+
+// Keeps the last download decisions so a wrong-model report can be traced.
+// Everything also goes to the popup console with a [Meshport] prefix.
+function logDownload(event, data = {}) {
+  try {
+    const line = { at: Date.now(), event, ...data };
+    (window.__meshportLog ||= []).push(line);
+    console.log("[Meshport]", event, data);
+    localStorage.setItem("meshport/last-download", JSON.stringify(window.__meshportLog.slice(-80)));
+  } catch {
+    // Logging is best effort.
+  }
+}
 
 function sandboxReady() {
   if (sandboxReadyPromise) return sandboxReadyPromise;
@@ -514,6 +531,9 @@ async function refreshCapturedModels(tabId) {
   const cutoff = Date.now() - MODEL_LINK_TTL;
   capturedModels = [...(response?.entries || []), ...(response?.recent || [])]
     .filter((entry) => entry?.url && (entry.capturedAt || 0) >= cutoff);
+  learnedOperators = response?.operators && typeof response.operators === "object"
+    ? response.operators
+    : {};
   return capturedModels;
 }
 
@@ -530,6 +550,7 @@ function acceptedStems(entry) {
     add(item?.stem);
     add(item?.operatorId);
   }
+  for (const id of learnedOperators[entry?.projectId] || []) add(id);
   return [...stems];
 }
 
@@ -548,6 +569,39 @@ function capturedLinkFor(projectId, stems = []) {
   return (newest(confirmed) || newest(matches))?.url || "";
 }
 
+// Tripo GLBs name their nodes tripo_node_<operator id>, the same id Blender
+// shows after an import. Reading it from the file proves which model the
+// bytes belong to, even when the download URL was bound to another asset.
+function glbContentIds(buffer) {
+  try {
+    const bytes = new Uint8Array(buffer);
+    if (meshportModelKind(bytes) !== "glb" || bytes.length < 20) return [];
+    if (bytes[16] !== 0x4a || bytes[17] !== 0x53 || bytes[18] !== 0x4f || bytes[19] !== 0x4e) {
+      return [];
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const length = view.getUint32(12, true);
+    if (!length || 20 + length > bytes.length) return [];
+    const text = new TextDecoder().decode(bytes.subarray(20, 20 + length));
+    const ids = [];
+    for (const match of text.matchAll(/tripo_node_([a-z0-9][a-z0-9-]{7,127})/gi)) {
+      const id = match[1].toLowerCase();
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
+// Unverifiable files (no operator node name) pass; a file that carries ids
+// must have one of the stems the project detail vouches for.
+function glbContentVerified(buffer, stems) {
+  const ids = glbContentIds(buffer);
+  if (!ids.length || !stems.length) return true;
+  return ids.some((id) => stems.includes(id));
+}
+
 async function openProjectAndCapture(projectId, stems = []) {
   if (!projectId) throw new Error("This model has no Tripo project id.");
   const link = `https://studio.tripo3d.ai/workspace/generate/${encodeURIComponent(projectId)}`;
@@ -563,6 +617,7 @@ async function openProjectAndCapture(projectId, stems = []) {
 
   const deadline = startedAt + CAPTURE_OPEN_TIMEOUT;
   let shownSecond = 0;
+  const probed = new Set();
   try {
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
@@ -576,12 +631,40 @@ async function openProjectAndCapture(projectId, stems = []) {
       const byStem = [...own, ...others]
         .filter((capture) => stems.length && tripoModelMatchesStem(capture.url, stems))
         .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
-      // This tab was opened for this project, so the first GLB it loads is the
-      // model even when the viewer names the file differently from the detail
-      // link. Later GLBs are preloads, not the model that was asked for.
-      const firstOwn = [...own].sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0))[0];
-      const match = byStem || firstOwn;
-      if (match?.url) return match.url;
+      if (byStem?.url) {
+        logDownload("helper-stem-match", { url: byStem.url, stems });
+        return { url: byStem.url };
+      }
+
+      if (!stems.length) {
+        // Nothing is known about this project's file ids, so the first GLB
+        // the tab loads is the best guess available.
+        const firstOwn = [...own].sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0))[0];
+        if (firstOwn?.url) {
+          logDownload("helper-first-glb", { url: firstOwn.url });
+          return { url: firstOwn.url };
+        }
+      } else {
+        // A preload of another asset can arrive before the model. Verify the
+        // files by content instead of trusting the load order.
+        for (const capture of [...own].sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0))) {
+          if (probed.has(capture.url) || probed.size >= 6) continue;
+          probed.add(capture.url);
+          setStatus("Checking the model Tripo loaded...", "busy");
+          try {
+            const glb = await fetchGlbFromUrl(capture.url);
+            const content = glb ? glbContentIds(glb) : [];
+            if (glb && glbContentVerified(glb, stems)) {
+              logDownload("helper-content-match", { url: capture.url, content, stems });
+              return { url: capture.url, glb };
+            }
+            logDownload("helper-content-rejected", { url: capture.url, content, stems });
+          } catch {
+            // Broken link; keep polling.
+          }
+        }
+      }
+
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       if (elapsed >= shownSecond + 5) {
         shownSecond = elapsed;
@@ -592,7 +675,11 @@ async function openProjectAndCapture(projectId, stems = []) {
     if (tab?.id) chrome.tabs.remove(tab.id).catch(() => {});
   }
 
-  throw new Error("Tripo opened this model without loading its GLB. Open the model in Tripo and try again.");
+  throw new Error(
+    stems.length
+      ? "Tripo only loaded previews of other assets, never the GLB of this model. Open the model in Tripo and press Download again."
+      : "Tripo opened this model without loading its GLB. Open the model in Tripo and try again.",
+  );
 }
 
 async function getLibraryFromTab() {
@@ -1002,6 +1089,12 @@ async function fetchSelectedBuffer() {
   if (!entry) throw new Error("No Tripo model selected.");
 
   await refreshCapturedModels();
+  logDownload("download-start", {
+    projectId: entry.projectId,
+    name: entry.name,
+    stem: entry.stem,
+    operatorId: entry.operatorId,
+  });
   const candidates = [];
   let lastError = null;
   const add = (url) => {
@@ -1015,8 +1108,17 @@ async function fetchSelectedBuffer() {
     // The project detail link is the one Tripo names for this project. Prefer
     // it over viewer captures, which can belong to another library card.
     try {
-      add(await resolveLibraryEntry(entry));
+      const detailUrl = await resolveLibraryEntry(entry);
+      logDownload("detail", {
+        url: detailUrl,
+        stem: entry.stem,
+        operatorId: entry.operatorId,
+        artifacts: entry.artifacts,
+        name: entry.name,
+      });
+      add(detailUrl);
     } catch (error) {
+      logDownload("detail-failed", { error: error.message });
       lastError = error;
     }
     add(entry.url);
@@ -1026,19 +1128,26 @@ async function fetchSelectedBuffer() {
   } else {
     add(entry.url);
   }
+  logDownload("candidates", { candidates, stems: acceptedStems(entry) });
 
   for (const url of [...candidates]) {
     if (NON_GLB_URL.test(url)) continue;
     setStatus("Downloading Tripo GLB...", "busy");
     try {
       const glb = await fetchGlbFromUrl(url);
-      if (glb) {
+      if (glb && glbContentVerified(glb, acceptedStems(entry))) {
+        logDownload("chosen", { url, content: glbContentIds(glb) });
         entry.url = url;
         entry.stem = entry.stem || tripoFileStem(url);
         entry.resolvedAt = Date.now();
         rememberModelLink(entry, url, entry.resolvedAt);
         return glb;
       }
+      logDownload("rejected-content", {
+        url,
+        content: glb ? glbContentIds(glb) : [],
+        stems: acceptedStems(entry),
+      });
     } catch (error) {
       lastError = error;
       if (!entry.projectId || !isExpiredLinkError(error)) continue;
@@ -1046,7 +1155,8 @@ async function fetchSelectedBuffer() {
         setStatus("Refreshing the Tripo link...", "busy");
         const refreshed = await resolveLibraryEntry(entry, true);
         const glb = await fetchGlbFromUrl(refreshed);
-        if (glb) {
+        if (glb && glbContentVerified(glb, acceptedStems(entry))) {
+          logDownload("chosen", { url: refreshed, content: glbContentIds(glb) });
           entry.resolvedAt = Date.now();
           rememberModelLink(entry, refreshed, entry.resolvedAt);
           return glb;
@@ -1067,13 +1177,37 @@ async function fetchSelectedBuffer() {
 
   setStatus("Tripo keeps this model in another format. Opening it to read the GLB...", "busy");
   const captured = await openProjectAndCapture(entry.projectId, acceptedStems(entry));
-  const glb = await fetchGlbFromUrl(captured);
+  const glb = captured.glb || await fetchGlbFromUrl(captured.url);
   if (!glb) throw new Error("Tripo loaded this model without a GLB.");
-  entry.url = captured;
-  entry.stem = entry.stem || tripoFileStem(captured);
+  logDownload("chosen-helper", { url: captured.url, content: glbContentIds(glb) });
+  entry.url = captured.url;
+  entry.stem = entry.stem || tripoFileStem(captured.url);
   entry.resolvedAt = Date.now();
-  rememberModelLink(entry, captured, entry.resolvedAt);
+  rememberModelLink(entry, captured.url, entry.resolvedAt);
   return glb;
+}
+
+// Some models only exist on Tripo as an FBX (quad topology, for example). The
+// FBX card downloads that native file straight from the project detail link,
+// exactly as Tripo stores it, instead of converting a GLB.
+async function fetchNativeModel(entry) {
+  if (!entry?.projectId) {
+    throw new Error("Open the model in Tripo so Meshport can find its native file.");
+  }
+  setBusy(true, "Reading the project file...");
+  const url = await resolveLibraryEntry(entry, true);
+  const bytes = new Uint8Array(await fetchArrayBuffer(url));
+  const kind = meshportModelKind(bytes);
+  const urlExt = /\.(fbx|zip|glb)(?:$|[?#])/i.exec(url)?.[1].toLowerCase() || "";
+  const ext = kind === "fbx" || kind === "zip" || kind === "glb" ? kind : urlExt;
+  if (!ext) {
+    throw new Error("Tripo has no FBX or GLB file stored for this model.");
+  }
+  return {
+    bytes,
+    ext,
+    note: ext === "fbx" ? "" : `Tripo keeps this model as ${ext.toUpperCase()}, saved that instead.`,
+  };
 }
 
 async function runSandboxJob(request, fallbackUrl) {
@@ -1374,6 +1508,21 @@ convertButton.addEventListener("click", async () => {
   const key = selectionKey;
   try {
     const format = currentFormat();
+    if (format === "fbx") {
+      const native = await fetchNativeModel(entry);
+      const mimeType = native.ext === "zip"
+        ? "application/zip"
+        : native.ext === "glb"
+          ? "model/gltf-binary"
+          : "application/octet-stream";
+      const fileName = `${currentBaseName(entry)}.${native.ext}`;
+      setBusy(true, FORMAT_SAVE.fbx);
+      await downloadBlob(new Blob([native.bytes], { type: mimeType }), fileName);
+      logDownload("chosen-native", { ext: native.ext });
+      setStatus(`${fileName} saved${native.note ? ` · ${native.note}` : ""}.`, "ok");
+      return;
+    }
+
     setBusy(true, inspectedKey === key ? "Building output..." : "Downloading Tripo GLB...");
     const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
     setBusy(true, FORMAT_PROGRESS[format] || "Converting...");
@@ -1391,6 +1540,7 @@ convertButton.addEventListener("click", async () => {
       "ok",
     );
   } catch (error) {
+    logDownload("error", { message: error.message });
     setStatus(`Error: ${error.message}`, "error");
   } finally {
     setBusy(false);

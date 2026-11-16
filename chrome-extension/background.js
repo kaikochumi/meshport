@@ -3,11 +3,15 @@ importScripts("shared.js");
 const tabTripoRequests = new Map();
 const tabDetailProjects = new Map();
 const recentModels = [];
+const projectOperators = new Map();
 const STORAGE_PREFIX = "tripo-tab-";
 const RECENT_KEY = "tripo-recent";
+const OPERATORS_KEY = "tripo-operators";
 const MAX_ENTRIES = 20;
 const RECENT_LIMIT = 30;
 const RECENT_TTL = 30 * 60 * 1000;
+const OPERATOR_TTL = 30 * 60 * 1000;
+const OPERATOR_LIMIT = 20;
 const DETAIL_BIND_TTL = 2 * 60 * 1000;
 
 function storageKey(tabId) {
@@ -83,6 +87,45 @@ async function getRecent() {
   return pruned;
 }
 
+// The project page calls the detail endpoint with the current operator id in
+// the query string. That id is what Tripo names GLB files after, so keep it
+// per project as a trusted stem for downloads.
+async function rememberOperators(projectId, operatorId) {
+  if (!projectId || !operatorId) return;
+  const entries = projectOperators.get(projectId) || [];
+  const existing = entries.find((entry) => entry.id === operatorId);
+  if (existing) {
+    existing.at = Date.now();
+  } else {
+    entries.push({ id: operatorId, at: Date.now() });
+    while (entries.length > OPERATOR_LIMIT) entries.shift();
+  }
+  projectOperators.set(projectId, entries);
+  const snapshot = {};
+  for (const [id, list] of projectOperators) snapshot[id] = list;
+  chrome.storage.session.set({ [OPERATORS_KEY]: snapshot }).catch(() => {});
+}
+
+async function getOperators() {
+  if (!projectOperators.size) {
+    try {
+      const stored = await chrome.storage.session.get(OPERATORS_KEY);
+      for (const [projectId, list] of Object.entries(stored[OPERATORS_KEY] || {})) {
+        if (Array.isArray(list)) projectOperators.set(projectId, list);
+      }
+    } catch {
+      return {};
+    }
+  }
+  const cutoff = Date.now() - OPERATOR_TTL;
+  const snapshot = {};
+  for (const [projectId, list] of projectOperators) {
+    const fresh = list.filter((entry) => (entry.at || 0) >= cutoff).map((entry) => entry.id);
+    if (fresh.length) snapshot[projectId] = fresh;
+  }
+  return snapshot;
+}
+
 function forget(tabId) {
   tabTripoRequests.delete(tabId);
   tabDetailProjects.delete(tabId);
@@ -110,6 +153,12 @@ chrome.webRequest.onBeforeRequest.addListener(
         documentUrl,
         at: Date.now(),
       });
+      try {
+        const operatorId = new URL(details.url).searchParams.get("operator_id");
+        if (operatorId) rememberOperators(detailProjectId, operatorId.slice(0, 128));
+      } catch {
+        // The detail link stays usable without the operator id.
+      }
       return;
     }
 
@@ -150,9 +199,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "get-tripo-requests" && Number.isInteger(message.tabId)) {
-    Promise.all([getEntries(message.tabId), getRecent()])
-      .then(([entries, recent]) => sendResponse({ entries, recent }))
-      .catch(() => sendResponse({ entries: [], recent: [] }));
+    Promise.all([getEntries(message.tabId), getRecent(), getOperators()])
+      .then(([entries, recent, operators]) => sendResponse({ entries, recent, operators }))
+      .catch(() => sendResponse({ entries: [], recent: [], operators: {} }));
     return true;
   }
 });
