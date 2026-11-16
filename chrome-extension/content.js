@@ -298,6 +298,22 @@ const MESHY_TASKS_QUERY = "?excludeWorkspace=true&pageNum=1&pageSize=50"
   + "&phases=animate&phases=auto-uv&phases=part-segmentation&phases=model-edit&phases=relief"
   + "&sortBy=-created_at";
 
+// Every workspace API call carries the device id the app keeps in
+// localStorage, with a cookie of the same name as fallback. Without it the
+// API answers 401 even with the session cookies on board.
+const MESHY_DEVICE_ID_KEY = "meshy_device_id";
+
+function meshyDeviceId() {
+  try {
+    const stored = localStorage.getItem(MESHY_DEVICE_ID_KEY);
+    if (stored) return stored;
+  } catch {
+    // Storage can be blocked; fall through to the cookie.
+  }
+  const match = /(?:^|;\s*)meshy_device_id=([^;]+)/.exec(document.cookie || "");
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 function meshyOpenTaskId() {
   let latest = null;
   for (const entry of performance.getEntriesByType("resource")) {
@@ -309,10 +325,15 @@ function meshyOpenTaskId() {
 }
 
 async function meshyJson(path, step) {
+  const deviceId = meshyDeviceId();
+  if (!deviceId) {
+    throw new Error("Meshport could not read the Meshy session. Reload the Meshy tab, then rescan.");
+  }
   let response;
   try {
     response = await fetch(`https://${location.host}/meshyd-api/web${path}`, {
       credentials: "include",
+      headers: { "X-Device-Id": deviceId },
     });
   } catch {
     throw new Error(`Could not reach Meshy to ${step}. Reload the Meshy tab and try again.`);
