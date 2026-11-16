@@ -20,8 +20,7 @@ const platformButtons = {
 };
 const textureSummary = document.getElementById("texture-summary");
 const textureList = document.getElementById("texture-list");
-const tabExport = document.getElementById("tab-export");
-const tabSettings = document.getElementById("tab-settings");
+const viewToggle = document.getElementById("view-toggle");
 const viewExport = document.getElementById("view-export");
 const viewSettings = document.getElementById("view-settings");
 const askSaveCheckbox = document.getElementById("ask-save");
@@ -499,10 +498,8 @@ function showView(name) {
   const isSettings = name === "settings";
   viewExport.hidden = isSettings;
   viewSettings.hidden = !isSettings;
-  tabExport.setAttribute("aria-selected", String(!isSettings));
-  tabSettings.setAttribute("aria-selected", String(isSettings));
-  tabExport.tabIndex = isSettings ? -1 : 0;
-  tabSettings.tabIndex = isSettings ? 0 : -1;
+  viewToggle.title = isSettings ? "Back to export" : "Open settings";
+  viewToggle.setAttribute("aria-label", viewToggle.title);
   document.body.classList.toggle("settings-open", isSettings);
   if (isSettings) {
     updatePathPreview();
@@ -1558,16 +1555,8 @@ defaultFormatInputs.forEach((input) => {
   input.addEventListener("change", () => setFormat(input.value));
 });
 
-tabExport.addEventListener("click", () => showView("export"));
-tabSettings.addEventListener("click", () => showView("settings"));
-[tabExport, tabSettings].forEach((tab) => {
-  tab.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const nextTab = tab === tabExport ? tabSettings : tabExport;
-    showView(nextTab === tabSettings ? "settings" : "export");
-    nextTab.focus();
-  });
+viewToggle.addEventListener("click", () => {
+  showView(viewSettings.hidden ? "settings" : "export");
 });
 
 askSaveCheckbox.addEventListener("change", () => {
