@@ -25,9 +25,12 @@ function tripoFileStem(value) {
   }
 }
 
-function tripoModelMatchesStem(value, stem) {
-  if (!stem) return true;
-  return tripoFileStem(value).toLowerCase() === String(stem).toLowerCase();
+function tripoModelMatchesStem(value, stems) {
+  const list = (Array.isArray(stems) ? stems : [stems])
+    .filter((stem) => typeof stem === "string" && stem.trim());
+  if (!list.length) return true;
+  const stem = tripoFileStem(value).toLowerCase();
+  return list.some((item) => item.trim().toLowerCase() === stem);
 }
 
 function tripoAbsoluteUrl(value, base) {

@@ -113,6 +113,36 @@ async function projectDetail(projectId) {
   return studioApi(`/v2/studio/project/detail/v3/${encodeURIComponent(projectId)}`);
 }
 
+function detailOperator(data) {
+  const operator = data?.operator;
+  const operatorId = typeof operator?.operator_id === "string"
+    ? operator.operator_id.trim().slice(0, 128)
+    : "";
+  const artifacts = [];
+  for (const key of ["Retarget", "retarget", "retarget_model"]) {
+    const list = Array.isArray(operator?.[key]) ? operator[key] : [];
+    for (const item of list) {
+      const value = typeof item?.model_url === "string" ? item.model_url : "";
+      if (!value) continue;
+      let url;
+      try {
+        url = new URL(value);
+      } catch {
+        continue;
+      }
+      if (url.protocol !== "https:") continue;
+      artifacts.push({
+        url: url.href,
+        stem: tripoFileStem(url.href),
+        operatorId: typeof item?.operator_id === "string"
+          ? item.operator_id.trim().slice(0, 128)
+          : "",
+      });
+    }
+  }
+  return { operatorId, artifacts };
+}
+
 async function resolveProjectModel(projectId) {
   const data = await projectDetail(projectId);
   if (data?.id && String(data.id) !== String(projectId)) {
@@ -134,6 +164,7 @@ async function resolveProjectModel(projectId) {
     url: url.href,
     stem: tripoFileStem(url.href),
     name: tripoLibraryProject(data, "mine")?.name || "",
+    ...detailOperator(data),
   };
 }
 
