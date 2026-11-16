@@ -149,7 +149,7 @@ async function resolveProjectModel(projectId) {
     throw new Error("Tripo returned a different project. Reload the page and try again.");
   }
   const value = typeof data?.model_url === "string" ? data.model_url : "";
-  if (!value) throw new Error("Tripo has no model file for this model yet.");
+  if (!value) throw new Error("Tripo has no file stored for this model yet.");
 
   let url;
   try {

@@ -699,7 +699,7 @@ function glbContentVerified(buffer, stems) {
 }
 
 async function openProjectAndCapture(projectId, stems = []) {
-  if (!projectId) throw new Error("This model has no Tripo project id.");
+  if (!projectId) throw new Error("Meshport could not identify this model in Tripo.");
   const link = `https://studio.tripo3d.ai/workspace/generate/${encodeURIComponent(projectId)}`;
   const startedAt = Date.now();
   setStatus("Opening the model in Tripo to read its GLB...", "busy");
@@ -773,8 +773,8 @@ async function openProjectAndCapture(projectId, stems = []) {
 
   throw new Error(
     stems.length
-      ? "Tripo only loaded previews of other assets, never the GLB of this model. Open the model in Tripo and press Download again."
-      : "Tripo opened this model without loading its GLB. Open the model in Tripo and try again.",
+      ? "Tripo loaded previews but not this model's GLB. Open the model and press Download again."
+      : "Tripo opened this model without its GLB. Open the model and try again.",
   );
 }
 
@@ -805,7 +805,7 @@ async function getLibraryFromTab() {
 }
 
 async function resolveLibraryEntry(entry, force = false) {
-  if (!entry?.projectId) throw new Error("This model has no Tripo project id.");
+  if (!entry?.projectId) throw new Error("Meshport could not identify this model in Tripo.");
 
   const matchesEntry = (url) => tripoModelMatchesStem(url, entry.stem);
   if (entry.url && !matchesEntry(entry.url)) {
@@ -1012,7 +1012,7 @@ function fillLinks(entries) {
     button.setAttribute("aria-selected", "false");
     button.tabIndex = -1;
     button.style.setProperty("--i", String(Math.min(index, 8)));
-    button.title = `${entryTitle(entry)}. Double-click downloads with the current format.`;
+    button.title = `${entryTitle(entry)}. Double-click to download in the current format.`;
 
     const thumb = document.createElement("span");
     thumb.className = "model-thumb";
@@ -1275,7 +1275,7 @@ async function fetchSelectedBuffer() {
     );
   }
 
-  setStatus("Tripo keeps this model in another format. Opening it to read the GLB...", "busy");
+  setStatus("Tripo stores this model in another format. Opening it to read the GLB...", "busy");
   const captured = await openProjectAndCapture(entry.projectId, acceptedStems(entry));
   const glb = captured.glb || await fetchGlbFromUrl(captured.url);
   if (!glb) throw new Error("Tripo loaded this model without a GLB.");
@@ -1301,7 +1301,7 @@ async function fetchNativeModel(entry) {
   const urlExt = /\.(fbx|zip|glb)(?:$|[?#])/i.exec(url)?.[1].toLowerCase() || "";
   const ext = kind === "fbx" || kind === "zip" || kind === "glb" ? kind : urlExt;
   if (!ext) {
-    throw new Error("Tripo has no FBX or GLB file stored for this model.");
+    throw new Error("Tripo has no FBX or GLB stored for this model.");
   }
   return {
     bytes,
@@ -1418,7 +1418,7 @@ function fillMeshyPlaceholder() {
   icon.className = "empty-icon";
   icon.innerHTML = MODEL_GLYPH;
   const text = document.createElement("p");
-  text.textContent = "Meshy is not wired up yet. The model you have open at app.meshy.ai becomes exportable in an upcoming update.";
+  text.textContent = "Meshy is not wired up yet. The next update exports the model you have open at app.meshy.ai.";
   empty.append(icon, text);
   linksList.append(empty);
   updateActionState();
