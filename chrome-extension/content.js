@@ -1,4 +1,4 @@
-const reported = new Set();
+const reported = new Map();
 const liveUrls = new Set();
 
 const STUDIO_API = "https://api.tripo3d.ai";
@@ -169,14 +169,31 @@ function collectTripoLinks() {
   return [...urls].slice(0, 50);
 }
 
-function report(urls) {
-  // Links found in the page can belong to any card in the library. Leave them
-  // unbound; only real network requests get a project id.
+function pageProjectId() {
+  return tripoProjectIdFromUrl(location.href);
+}
+
+function report(urls, bindToPage = false) {
+  // Scraped links can belong to any card in the library, so they stay
+  // unbound. A request the page actually made belongs to its project.
+  const projectId = bindToPage ? pageProjectId() : "";
   for (const url of urls) {
-    if (reported.has(url)) continue;
-    reported.add(url);
-    chrome.runtime.sendMessage({ type: "remember-tripo-url", url }).catch(() => {});
+    if (reported.has(url)) {
+      const previous = reported.get(url);
+      if (previous === projectId) continue;
+      if (previous && !projectId) continue;
+    }
+    reported.set(url, projectId);
+    chrome.runtime.sendMessage({ type: "remember-tripo-url", url, projectId }).catch(() => {});
   }
+}
+
+function reportResources() {
+  if (typeof performance === "undefined") return;
+  const links = performance.getEntriesByType("resource")
+    .map((entry) => entry.name.split("#")[0])
+    .filter((url) => isTripoGlbUrl(url));
+  report(links, true);
 }
 
 function reportCollected() {
@@ -185,6 +202,7 @@ function reportCollected() {
   return links;
 }
 
+reportResources();
 reportCollected();
 
 if (typeof PerformanceObserver === "function") {
@@ -194,7 +212,7 @@ if (typeof PerformanceObserver === "function") {
       for (const entry of entries.getEntries()) {
         if (isTripoGlbUrl(entry.name)) links.push(entry.name);
       }
-      report(links);
+      report(links, true);
     });
     observer.observe({ entryTypes: ["resource"] });
   } catch {
@@ -205,12 +223,13 @@ if (typeof PerformanceObserver === "function") {
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data;
-  if (!data || data.source !== "meshport" || data.type !== "model-url") return;
+  if (!data || data.source !== "meshport") return;
+  if (data.type !== "model-url" && data.type !== "model-request") return;
   if (typeof data.url !== "string") return;
   const url = data.url.split("#")[0];
   if (!isTripoGlbUrl(url)) return;
   liveUrls.add(url);
-  report([url]);
+  report([url], data.type === "model-request");
 });
 
 window.postMessage({ source: "meshport-content", type: "ready" }, "*");

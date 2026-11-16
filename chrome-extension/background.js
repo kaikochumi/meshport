@@ -19,32 +19,34 @@ function pruneRecent(list) {
   return list.filter((entry) => entry?.url && (entry.capturedAt || 0) >= cutoff);
 }
 
-function rememberRecent(url, projectId = "") {
+function rememberRecent(url, projectId = "", doc = "") {
   if (!isTripoGlbUrl(url)) return;
   const index = recentModels.findIndex((entry) => entry.url === url);
   if (index >= 0) {
     const previous = recentModels[index];
     if (!projectId && previous.projectId) projectId = previous.projectId;
+    if (!doc && previous.doc) doc = previous.doc;
     recentModels.splice(index, 1);
   }
-  recentModels.unshift({ url, capturedAt: Date.now(), projectId });
+  recentModels.unshift({ url, capturedAt: Date.now(), projectId, doc });
   while (recentModels.length > RECENT_LIMIT) recentModels.pop();
   chrome.storage.session.set({ [RECENT_KEY]: recentModels }).catch(() => {});
 }
 
-function remember(tabId, url, projectId = "") {
+function remember(tabId, url, projectId = "", doc = "") {
   if (!isTripoGlbUrl(url)) return;
-  rememberRecent(url, projectId);
+  rememberRecent(url, projectId, doc);
   if (tabId < 0) return;
 
   const entries = tabTripoRequests.get(tabId) || [];
   const existing = entries.find((entry) => entry.url === url);
   if (existing) {
     if (!existing.projectId && projectId) existing.projectId = projectId;
+    if (!existing.doc && doc) existing.doc = doc;
     return;
   }
 
-  entries.unshift({ url, capturedAt: Date.now(), projectId });
+  entries.unshift({ url, capturedAt: Date.now(), projectId, doc });
   const trimmed = entries.slice(0, MAX_ENTRIES);
   tabTripoRequests.set(tabId, trimmed);
   chrome.storage.session.set({ [storageKey(tabId)]: trimmed }).catch(() => {});
@@ -94,7 +96,9 @@ chrome.webRequest.onBeforeRequest.addListener(
       return;
     }
     if (details.tabId < 0) {
-      if (isTripoGlbUrl(details.url)) remember(details.tabId, details.url, "");
+      if (isTripoGlbUrl(details.url)) {
+        remember(details.tabId, details.url, "", details.documentUrl || "");
+      }
       return;
     }
 
@@ -111,7 +115,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 
     const documentProjectId = tripoProjectIdFromUrl(documentUrl);
     if (documentProjectId) {
-      remember(details.tabId, details.url, documentProjectId);
+      remember(details.tabId, details.url, documentProjectId, documentUrl);
       return;
     }
     if (!isTripoGlbUrl(details.url)) return;
@@ -120,7 +124,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     const fresh = detail
       && Date.now() - detail.at < DETAIL_BIND_TTL
       && (!documentUrl || !detail.documentUrl || detail.documentUrl === documentUrl);
-    remember(details.tabId, details.url, fresh ? detail.projectId : "");
+    remember(details.tabId, details.url, fresh ? detail.projectId : "", documentUrl);
   },
   { urls: [
     "*://tripo3d.ai/*",
@@ -136,7 +140,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "remember-tripo-url" && sender.tab?.id !== undefined) {
-    remember(sender.tab.id, message.url, "");
+    const projectId = typeof message.projectId === "string"
+      ? message.projectId.slice(0, 128)
+      : "";
+    const doc = projectId ? (sender.tab.url || "") : "";
+    remember(sender.tab.id, message.url, projectId, doc);
     sendResponse({ ok: true });
     return;
   }

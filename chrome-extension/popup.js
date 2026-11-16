@@ -520,12 +520,16 @@ async function refreshCapturedModels(tabId) {
 function capturedLinkFor(projectId, stem = "") {
   if (!projectId) return "";
   const cutoff = Date.now() - MODEL_LINK_TTL;
-  const match = capturedModels
-    .filter((entry) => entry.projectId === projectId
+  const matches = capturedModels
+    .filter((entry) => entry?.url
       && (entry.capturedAt || 0) >= cutoff
-      && tripoModelMatchesStem(entry.url, stem))
-    .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
-  return match?.url || "";
+      && tripoModelMatchesStem(entry.url, stem)
+      && (entry.projectId === projectId
+        || tripoProjectIdFromUrl(entry.doc || "") === projectId));
+  const confirmed = matches
+    .filter((entry) => tripoProjectIdFromUrl(entry.doc || "") === projectId);
+  const newest = (list) => [...list].sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
+  return (newest(confirmed) || newest(matches))?.url || "";
 }
 
 async function openProjectAndCapture(projectId, stem = "") {
@@ -542,6 +546,7 @@ async function openProjectAndCapture(projectId, stem = "") {
   }
 
   const deadline = startedAt + CAPTURE_OPEN_TIMEOUT;
+  let shownSecond = 0;
   try {
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
@@ -549,16 +554,23 @@ async function openProjectAndCapture(projectId, stem = "") {
         type: "get-tripo-requests",
         tabId: tab.id,
       }).catch(() => null);
-      const captures = [
-        ...(response?.entries || []),
-        ...(stem ? response?.recent || [] : []),
-      ];
-      const match = captures
-        .filter((entry) => entry?.url
-          && (entry.capturedAt || 0) >= startedAt - 1000
-          && tripoModelMatchesStem(entry.url, stem))
+      const fresh = (value) => value?.url && (value.capturedAt || 0) >= startedAt - 1000;
+      const own = (response?.entries || []).filter(fresh);
+      const others = stem ? (response?.recent || []).filter(fresh) : [];
+      const byStem = [...own, ...others]
+        .filter((capture) => stem && tripoModelMatchesStem(capture.url, stem))
         .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
+      // This tab was opened for this project, so the first GLB it loads is the
+      // model even when the viewer names the file differently from the detail
+      // link. Later GLBs are preloads, not the model that was asked for.
+      const firstOwn = [...own].sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0))[0];
+      const match = byStem || firstOwn;
       if (match?.url) return match.url;
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      if (elapsed >= shownSecond + 5) {
+        shownSecond = elapsed;
+        setStatus(`Opening the model in Tripo to read its GLB... ${elapsed}s`, "busy");
+      }
     }
   } finally {
     if (tab?.id) chrome.tabs.remove(tab.id).catch(() => {});
@@ -962,9 +974,9 @@ async function fetchSelectedBuffer() {
   await refreshCapturedModels();
   const candidates = [];
   let lastError = null;
-  const add = (url) => {
+  const add = (url, trusted = false) => {
     if (!url || candidates.includes(url)) return;
-    if (entry.stem && !tripoModelMatchesStem(url, entry.stem)) return;
+    if (!trusted && entry.stem && !tripoModelMatchesStem(url, entry.stem)) return;
     candidates.push(url);
   };
 
@@ -972,14 +984,40 @@ async function fetchSelectedBuffer() {
     // The project detail link is the one Tripo names for this project. Prefer
     // it over viewer captures, which can belong to another library card.
     try {
-      add(await resolveLibraryEntry(entry));
+      add(await resolveLibraryEntry(entry), true);
     } catch (error) {
       lastError = error;
     }
-    add(entry.url);
-    add(capturedLinkFor(entry.projectId, entry.stem));
+    add(entry.url, true);
+    add(capturedLinkFor(entry.projectId, entry.stem), true);
+    // A viewer capture can use a different file id than the detail link while
+    // still belonging to the open project, so it is the next best source.
+    add(capturedLinkFor(entry.projectId), true);
+
+    // If the model is already open in another tab, its newest GLB is the
+    // mesh on screen even when the request could not be bound.
+    try {
+      const tabs = await chrome.tabs.query({
+        url: ["*://tripo3d.ai/*", "*://*.tripo3d.ai/*", "*://tripo3d.com/*"],
+      });
+      const projectTab = tabs.find((tab) => tab.id
+        && tripoProjectIdFromUrl(tab.url || "") === entry.projectId);
+      if (projectTab) {
+        const response = await chrome.runtime.sendMessage({
+          type: "get-tripo-requests",
+          tabId: projectTab.id,
+        }).catch(() => null);
+        const recent = (response?.entries || []).filter((capture) => capture?.url
+          && Date.now() - (capture.capturedAt || 0) < MODEL_LINK_TTL);
+        const preferred = recent.filter((capture) => tripoModelMatchesStem(capture.url, entry.stem));
+        const pick = preferred[0] || recent[0];
+        if (pick) add(pick.url, true);
+      }
+    } catch {
+      // The helper tab below can still load the model.
+    }
   } else {
-    add(entry.url);
+    add(entry.url, true);
   }
 
   for (const url of [...candidates]) {

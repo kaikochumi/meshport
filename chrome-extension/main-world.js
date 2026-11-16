@@ -1,6 +1,27 @@
 (() => {
   const PATTERN = /https?:\/\/[^"'\\\s<>]+\.glb[^"'\\\s<>]*/gi;
   const seen = new Set();
+  const seenRequests = new Set();
+
+  function requestUrl(value) {
+    try {
+      const raw = typeof value === "string" ? value : value?.url;
+      if (typeof raw !== "string" || !raw) return "";
+      const url = new URL(raw, location.href);
+      url.hash = "";
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+
+  function reportRequest(value) {
+    const url = requestUrl(value);
+    if (!url || !/\.glb(?:[?#]|$)/i.test(url)) return;
+    if (seenRequests.has(url)) return;
+    seenRequests.add(url);
+    window.postMessage({ source: "meshport", type: "model-request", url }, "*");
+  }
 
   function report(text) {
     if (typeof text !== "string") return;
@@ -25,6 +46,7 @@
   if (typeof window.fetch === "function") {
     const originalFetch = window.fetch;
     window.fetch = function (...args) {
+      reportRequest(args[0]);
       const promise = originalFetch.apply(this, args);
       promise.then((response) => {
         try {
@@ -43,6 +65,7 @@
   if (typeof window.XMLHttpRequest === "function") {
     const open = window.XMLHttpRequest.prototype.open;
     window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      reportRequest(url);
       this.addEventListener("load", () => {
         try {
           if (typeof this.responseText === "string") report(this.responseText);
