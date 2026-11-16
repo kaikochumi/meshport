@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Zip the extension
-        run: zip -qr "../meshport-${{ github.ref_name }}.zip" chrome-extension
+        run: zip -qr "meshport-${{ github.ref_name }}.zip" chrome-extension
 
       # Update the body below when you tag the next version.
       - name: Create the release
