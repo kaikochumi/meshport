@@ -343,11 +343,17 @@ async function meshyJson(path, step) {
   try {
     payload = JSON.parse(text);
   } catch {
-    throw new Error(`Meshy returned HTTP ${response.status} when trying to ${step}.`);
+    payload = null;
   }
   if (!response.ok || payload?.code !== "OK") {
+    // The Meshport tag tells a stale injected script from the current one:
+    // without it, an old tab and a real failure look identical.
+    const detail = typeof payload?.message === "string" && payload.message
+      ? ` ${payload.message}`
+      : "";
     throw new Error(
-      payload?.message || `Meshy returned HTTP ${response.status} when trying to ${step}.`,
+      `Meshy answered HTTP ${response.status} when trying to ${step}${detail}`
+        + ` (Meshport ${chrome.runtime.getManifest().version}). Reload the Meshy tab, then rescan.`,
     );
   }
   return payload.result;
