@@ -332,13 +332,24 @@ window.addEventListener("message", (event) => {
 });
 
 function meshyOpenTaskId() {
-  let latest = null;
+  // Calls that mean "this model is open": PUT .../open, GET .../status, and
+  // the bare task detail. Quota pings for every gallery item only prove the
+  // task exists, so they lose to any open signal.
+  let strong = null;
+  let weak = null;
   for (const entry of performance.getEntriesByType("resource")) {
     const match = MESHY_TASK_RE.exec(entry.name || "");
     if (!match) continue;
-    if (!latest || entry.startTime >= latest.at) latest = { id: match[1], at: entry.startTime };
+    const tail = entry.name.slice(match.index + match[0].length).split("?")[0];
+    const meansOpen = tail === "" || tail === "/" || /^\/(open|status)\b/i.test(tail);
+    const found = { id: match[1], at: entry.startTime };
+    if (meansOpen) {
+      if (!strong || found.at >= strong.at) strong = found;
+    } else if (!weak || found.at >= weak.at) {
+      weak = found;
+    }
   }
-  return latest?.id || "";
+  return strong?.id || weak?.id || "";
 }
 
 async function meshyJson(path, step) {
@@ -398,9 +409,10 @@ async function meshyModel() {
     if (listSettled.status === "fulfilled" && Array.isArray(listSettled.value)) {
       meshyTaskList = listSettled.value;
     }
-    // meshyJson already unwraps payload.result, so the status answer is
-    // the model info itself.
-    info = statusSettled.value || {};
+    // meshyJson unwraps the API envelope, and the status answer wraps the
+    // model info one level deeper: {status, result: {modelUrl}}.
+    const answer = statusSettled.value || {};
+    info = answer.result && typeof answer.result === "object" ? answer.result : answer;
   }
 
   const modelUrl = typeof info.modelUrl === "string" ? info.modelUrl : "";
@@ -417,7 +429,9 @@ async function meshyModel() {
       projectId: taskId,
       url: modelUrl,
       name: task?.name || "",
-      previewUrl: typeof info.previewUrl === "string" ? info.previewUrl : "",
+      previewUrl: typeof info.previewUrl === "string" && info.previewUrl
+        ? info.previewUrl
+        : task?.previewUrl || "",
       textures: [],
       counts: {
         triangles: Number(task?.triangleCount) || 0,

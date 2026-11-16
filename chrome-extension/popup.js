@@ -1233,7 +1233,7 @@ async function fetchMeshyGlb(entry, allowRefresh = true) {
     try {
       return await fetchMeshyGlb(fresh, false);
     } catch {
-      throw new Error("The Meshy link expired. Reopen the model in Meshy, then rescan.");
+      throw new Error("The Meshy link expired. Reload the Meshy tab, open the model, then rescan.");
     }
   }
   if (meshportModelKind(bytes) !== "glb") {

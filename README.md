@@ -54,7 +54,7 @@ Meshport remembers your selected model, format, and settings between uses.
 2. Click the Meshport icon and switch the source to Meshy. The popup scans by itself and lists the open model with its name and triangle count.
 3. Pick a format and download.
 
-Meshy exports as STL, OBJ, glTF, GLB, or a zip of textures. The thumbnail comes from the render Meshy already made. If a download link runs out, reopen the model in Meshy so the workspace fetches a fresh one, then rescan.
+Meshy exports as STL, OBJ, glTF, GLB, or a zip of textures. The thumbnail comes from the render Meshy already made. If a download link runs out, reload the Meshy tab, open the model, then rescan.
 
 The Settings tab sets a subfolder inside Downloads, switches the download to ask for a folder each time, and picks the default format.
 

@@ -20,7 +20,10 @@
   }
 
   function fromStatus(id, body) {
-    const result = body?.result;
+    // The status answer wraps the model info twice: result.result carries
+    // the model link and preview. An older single-wrap shape still works.
+    const outer = body?.result;
+    const result = outer?.result && typeof outer.result === "object" ? outer.result : outer;
     if (!result || typeof result !== "object") return;
     const modelUrl = typeof result.modelUrl === "string" ? result.modelUrl : "";
     if (!/^https:\/\/assets\.meshy\.ai\//i.test(modelUrl)) return;
@@ -42,6 +45,7 @@
       slim.push({
         id: task.id,
         name: typeof task.name === "string" ? task.name : "",
+        previewUrl: typeof task.result?.previewUrl === "string" ? task.result.previewUrl : "",
         triangleCount: Number(task.triangleCount) || 0,
         vertexCount: Number(task.vertexCount) || 0,
       });
