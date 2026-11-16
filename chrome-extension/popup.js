@@ -189,7 +189,14 @@ function loadThumbnailCache() {
   }
 }
 
-function saveThumbnailCache() {
+// Every card landing adds a thumbnail, and stringifying the whole cache per
+// arrival means redoing the same growing write dozens of times per scan.
+// Let the arrivals settle, then write once; a popup that closes sooner
+// flushes on the way out.
+let thumbnailSaveTimer = 0;
+
+function flushThumbnailCache() {
+  clearTimeout(thumbnailSaveTimer);
   const keys = Object.keys(thumbnailCache);
   while (keys.length > THUMB_LIMIT) delete thumbnailCache[keys.shift()];
   try {
@@ -197,6 +204,40 @@ function saveThumbnailCache() {
   } catch {
     // The cache is optional.
   }
+}
+
+function saveThumbnailCache() {
+  clearTimeout(thumbnailSaveTimer);
+  thumbnailSaveTimer = setTimeout(flushThumbnailCache, 800);
+}
+
+window.addEventListener("pagehide", flushThumbnailCache);
+
+// Card thumbs render at about 56px. A full-size Meshy render can weigh
+// hundreds of kilobytes, which burns the storage quota for a picture this
+// small, so draw it down before it enters the cache.
+async function downscaleImage(blob, max = 256) {
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    const url = canvas.toDataURL("image/webp", 0.85);
+    if (url.startsWith("data:image/webp/")) return url;
+  } catch {
+    // Drawing can fail on an unusual format; the original still works.
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(blob);
+  });
 }
 
 function thumbnailKey(entry) {
@@ -334,12 +375,7 @@ async function generateThumbnail(entry, card, token, key) {
       if (!image.ok) return;
       const blob = await image.blob();
       if (token !== scanToken || !card.isConnected) return;
-      const dataUrl = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => resolve("");
-        reader.readAsDataURL(blob);
-      });
+      const dataUrl = await downscaleImage(blob);
       if (!dataUrl.startsWith("data:image/")) return;
       thumbnailCache[key] = dataUrl;
       saveThumbnailCache();
@@ -1490,7 +1526,12 @@ function renderMeshyEmpty(message) {
   icon.innerHTML = MODEL_GLYPH;
   const text = document.createElement("p");
   text.textContent = message;
-  empty.append(icon, text);
+  const rescan = document.createElement("button");
+  rescan.type = "button";
+  rescan.className = "empty-reload";
+  rescan.textContent = "Rescan";
+  rescan.addEventListener("click", () => scan());
+  empty.append(icon, text, rescan);
   linksList.append(empty);
   updateActionState();
 }
