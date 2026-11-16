@@ -11,11 +11,7 @@
       <header class="top">
         <div class="brand">
           <span class="mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24">
-              <path d="M12 3 20 7.5 12 12 4 7.5Z" fill="currentColor"/>
-              <path d="M4 9 11 13v8L4 17Z" fill="currentColor" opacity=".55"/>
-              <path d="M20 9 13 13v8l7-4Z" fill="currentColor" opacity=".8"/>
-            </svg>
+            <img src="icons/icon-128.png" alt="">
           </span>
           <div class="brand-text">
             <h1>Meshport</h1>
@@ -134,20 +130,20 @@
           <label class="switch-row" id="ask-save-row">
             <span class="switch-text">
               <strong>Ask where to save</strong>
-              <small>Pick any folder for each download.</small>
+              <small>Choose a folder for every download.</small>
             </span>
             <input id="ask-save" type="checkbox">
             <span class="switch" aria-hidden="true"></span>
           </label>
-          <div class="field" id="folder-field">
-            <label for="subfolder">Subfolder in Downloads</label>
+          <div class="field folder-block" id="folder-field">
+            <div class="folder-head">
+              <label for="subfolder">Subfolder in Downloads</label>
+              <button id="open-downloads" class="link-button" type="button">Open Downloads</button>
+            </div>
             <input id="subfolder" type="text" placeholder="Meshport" autocomplete="off" spellcheck="false">
+            <p class="path-preview" id="path-preview">Downloads/Meshport/model.glb</p>
           </div>
-          <p class="path-preview" id="path-preview">Downloads/model.glb</p>
-          <p class="hint">The browser can only write inside Downloads. Use Ask where to save when you need another folder.</p>
-          <div class="settings-actions">
-            <button id="open-downloads" class="mini-button" type="button">Open Downloads folder</button>
-          </div>
+          <p class="hint" id="save-note">Files stay inside Downloads.</p>
         </section>
 
         <section class="setting">
@@ -161,26 +157,21 @@
             <label class="chip"><input type="radio" name="default-format" value="glb"><span>GLB</span></label>
             <label class="chip"><input type="radio" name="default-format" value="textures"><span>Textures</span></label>
           </div>
-          <p class="hint">The Export tab starts with this format.</p>
-        </section>
-
-        <section class="setting">
-          <div class="section-head">
-            <h2>Previews</h2>
-          </div>
-          <p class="hint" id="preview-count">No cached previews.</p>
-          <div class="settings-actions">
-            <button id="clear-previews" class="mini-button" type="button">Clear preview cache</button>
-            <button id="reset-settings" class="mini-button" type="button">Reset settings</button>
-          </div>
         </section>
 
         <section class="setting about">
-          <div class="section-head">
-            <h2>About</h2>
+          <div class="about-brand">
+            <img class="about-mark" src="icons/m-mark.png" alt="" width="44" height="44">
+            <div class="about-text">
+              <p class="about-name">Meshport <span id="version">0.3.2</span></p>
+              <p class="about-by">Built by <a href="https://github.com/kaikochumi" target="_blank" rel="noreferrer">@kaikochumi</a></p>
+            </div>
           </div>
-          <p>Meshport <span id="version">0.3.0</span>. Built by <a href="https://github.com/kaikochumi" target="_blank" rel="noreferrer">@kaikochumi</a>.</p>
-          <p>Tripo links expire after a few minutes. Meshport asks for a fresh link when a download fails.</p>
+          <div class="about-actions">
+            <span id="preview-count" class="about-count">No previews cached</span>
+            <button id="clear-previews" class="link-button" type="button">Clear previews</button>
+            <button id="reset-settings" class="link-button" type="button">Reset settings</button>
+          </div>
         </section>
       </div>
     </main>

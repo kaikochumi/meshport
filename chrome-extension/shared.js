@@ -17,12 +17,17 @@ function tripoFileStem(value) {
   try {
     const name = decodeURIComponent(new URL(value).pathname.split("/").pop() || "");
     return name
-      .replace(/\.glb$/i, "")
+      .replace(/\.(?:glb|gltf|fbx|obj|zip)$/i, "")
       .replace(/_meshopt$/i, "")
-      .replace(/^tripo_pbr_model_/i, "");
+      .replace(/^tripo_(?:[a-z0-9]+_)*model_/i, "");
   } catch {
     return "";
   }
+}
+
+function tripoModelMatchesStem(value, stem) {
+  if (!stem) return true;
+  return tripoFileStem(value).toLowerCase() === String(stem).toLowerCase();
 }
 
 function tripoAbsoluteUrl(value, base) {
@@ -168,6 +173,17 @@ function tripoProjectIdFromUrl(value) {
   }
 }
 
+function tripoProjectIdFromDetailUrl(value) {
+  if (!value || typeof value !== "string") return "";
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/\/v2\/studio\/project\/detail\/v3\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]).slice(0, 128) : "";
+  } catch {
+    return "";
+  }
+}
+
 function tripoLibraryProject(project, scope) {
   const id = project?.id;
   if (!id) return null;
@@ -183,7 +199,9 @@ function tripoLibraryProject(project, scope) {
 
 globalThis.isTripoGlbUrl = isTripoGlbUrl;
 globalThis.tripoFileStem = tripoFileStem;
+globalThis.tripoModelMatchesStem = tripoModelMatchesStem;
 globalThis.tripoProjectIdFromUrl = tripoProjectIdFromUrl;
+globalThis.tripoProjectIdFromDetailUrl = tripoProjectIdFromDetailUrl;
 globalThis.tripoLibraryProject = tripoLibraryProject;
 globalThis.meshportModelKind = meshportModelKind;
 globalThis.meshportGlbFromZip = meshportGlbFromZip;

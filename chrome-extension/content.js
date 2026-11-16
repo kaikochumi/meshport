@@ -115,6 +115,9 @@ async function projectDetail(projectId) {
 
 async function resolveProjectModel(projectId) {
   const data = await projectDetail(projectId);
+  if (data?.id && String(data.id) !== String(projectId)) {
+    throw new Error("Tripo returned a different project. Reload the page and try again.");
+  }
   const value = typeof data?.model_url === "string" ? data.model_url : "";
   if (!value) throw new Error("Tripo has no model file for this model yet.");
 
@@ -129,12 +132,9 @@ async function resolveProjectModel(projectId) {
   }
   return {
     url: url.href,
+    stem: tripoFileStem(url.href),
     name: tripoLibraryProject(data, "mine")?.name || "",
   };
-}
-
-function pageProjectId() {
-  return tripoProjectIdFromUrl(location.href);
 }
 
 function collectTripoLinks() {
@@ -170,11 +170,12 @@ function collectTripoLinks() {
 }
 
 function report(urls) {
-  const projectId = pageProjectId();
+  // Links found in the page can belong to any card in the library. Leave them
+  // unbound; only real network requests get a project id.
   for (const url of urls) {
     if (reported.has(url)) continue;
     reported.add(url);
-    chrome.runtime.sendMessage({ type: "remember-tripo-url", url, projectId }).catch(() => {});
+    chrome.runtime.sendMessage({ type: "remember-tripo-url", url }).catch(() => {});
   }
 }
 

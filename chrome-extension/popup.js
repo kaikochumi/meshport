@@ -21,6 +21,7 @@ const askSaveCheckbox = document.getElementById("ask-save");
 const folderField = document.getElementById("folder-field");
 const subfolderInput = document.getElementById("subfolder");
 const pathPreview = document.getElementById("path-preview");
+const saveNote = document.getElementById("save-note");
 const openDownloadsButton = document.getElementById("open-downloads");
 const clearPreviewsButton = document.getElementById("clear-previews");
 const resetSettingsButton = document.getElementById("reset-settings");
@@ -59,7 +60,7 @@ const SETTINGS_KEY = "meshport/settings/v1";
 const THUMB_KEY = "meshport/thumbnails/v1";
 const THUMB_LIMIT = 24;
 const LIBRARY_KEY = "meshport/library/v1";
-const MODEL_LINK_KEY = "meshport/model-links/v1";
+const MODEL_LINK_KEY = "meshport/model-links/v2";
 const MODEL_LINK_TTL = 4 * 60 * 1000;
 const CAPTURE_OPEN_TIMEOUT = 45000;
 const CAPTURE_POLL_MS = 700;
@@ -202,12 +203,21 @@ async function generateThumbnail(entry, card, token, key) {
   if (token !== scanToken || !card.isConnected) return;
 
   try {
-    const captured = capturedLinkFor(entry.projectId);
-    if (captured) entry.url = captured;
-    else if (!entry.url) await resolveLibraryEntry(entry);
-    const buffer = await fetchArrayBuffer(entry.url);
+    let thumbUrl = isTripoGlbUrl(entry.url) ? entry.url : "";
+    if (!thumbUrl && entry.projectId) {
+      try {
+        await resolveLibraryEntry(entry);
+      } catch {
+        // A captured viewer link can still be used.
+      }
+      if (isTripoGlbUrl(entry.url)) thumbUrl = entry.url;
+      if (!thumbUrl) thumbUrl = capturedLinkFor(entry.projectId, entry.stem);
+    }
+    if (!thumbUrl) thumbUrl = entry.url;
+    if (!thumbUrl) return;
+    const buffer = await fetchArrayBuffer(thumbUrl);
     if (token !== scanToken || !card.isConnected) return;
-    const response = await askSandbox({ type: "thumbnail", key: entry.url, buffer }, 30000);
+    const response = await askSandbox({ type: "thumbnail", key: thumbUrl, buffer }, 30000);
     if (token !== scanToken || !card.isConnected) return;
     thumbnailCache[key] = response.thumbnail;
     saveThumbnailCache();
@@ -290,13 +300,13 @@ function savePreferences() {
 function loadSettings() {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+    const value = parsed && typeof parsed === "object" ? parsed : {};
     return {
-      askSave: false,
-      subfolder: "",
-      ...(parsed && typeof parsed === "object" ? parsed : {}),
+      askSave: Boolean(value.askSave),
+      subfolder: typeof value.subfolder === "string" ? value.subfolder : "Meshport",
     };
   } catch {
-    return { askSave: false, subfolder: "" };
+    return { askSave: false, subfolder: "Meshport" };
   }
 }
 
@@ -323,28 +333,30 @@ function downloadPath(filename) {
 }
 
 function syncSettingsUi() {
-  askSaveCheckbox.checked = Boolean(settings.askSave);
+  const askSave = Boolean(settings.askSave);
+  askSaveCheckbox.checked = askSave;
   subfolderInput.value = settings.subfolder || "";
-  subfolderInput.disabled = Boolean(settings.askSave);
-  folderField.classList.toggle("disabled", Boolean(settings.askSave));
+  subfolderInput.disabled = askSave;
+  folderField.hidden = askSave;
+  saveNote.textContent = askSave
+    ? "You pick a folder in the save dialog."
+    : "Files stay inside Downloads.";
   updatePathPreview();
   updatePreviewCount();
 }
 
 function updatePathPreview() {
   const folder = cleanSubfolder(settings.subfolder);
-  pathPreview.textContent = settings.askSave
-    ? "You pick the folder in the save dialog."
-    : folder
-      ? `Downloads/${folder}/model.glb`
-      : "Downloads/model.glb";
+  pathPreview.textContent = folder
+    ? `Downloads/${folder}/model.glb`
+    : "Downloads/model.glb";
 }
 
 function updatePreviewCount() {
   const count = Object.keys(thumbnailCache).length;
   previewCount.textContent = count
-    ? `${count} preview${count === 1 ? "" : "s"} cached in this browser.`
-    : "No cached previews.";
+    ? `${count} preview${count === 1 ? "" : "s"} cached`
+    : "No previews cached";
 }
 
 function clearPreviewCache() {
@@ -505,18 +517,21 @@ async function refreshCapturedModels(tabId) {
   return capturedModels;
 }
 
-function capturedLinkFor(projectId) {
+function capturedLinkFor(projectId, stem = "") {
   if (!projectId) return "";
   const cutoff = Date.now() - MODEL_LINK_TTL;
   const match = capturedModels
-    .filter((entry) => entry.projectId === projectId && (entry.capturedAt || 0) >= cutoff)
+    .filter((entry) => entry.projectId === projectId
+      && (entry.capturedAt || 0) >= cutoff
+      && tripoModelMatchesStem(entry.url, stem))
     .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
   return match?.url || "";
 }
 
-async function openProjectAndCapture(projectId) {
+async function openProjectAndCapture(projectId, stem = "") {
   if (!projectId) throw new Error("This model has no Tripo project id.");
   const link = `https://studio.tripo3d.ai/workspace/generate/${encodeURIComponent(projectId)}`;
+  const startedAt = Date.now();
   setStatus("Opening the model in Tripo to read its GLB...", "busy");
 
   let tab;
@@ -526,19 +541,30 @@ async function openProjectAndCapture(projectId) {
     throw new Error("Could not open the model in Tripo. Check that the Tripo tab is still open.");
   }
 
-  const deadline = Date.now() + CAPTURE_OPEN_TIMEOUT;
+  const deadline = startedAt + CAPTURE_OPEN_TIMEOUT;
   try {
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
-      await refreshCapturedModels(tab.id);
-      const url = capturedLinkFor(projectId);
-      if (url) return url;
+      const response = await chrome.runtime.sendMessage({
+        type: "get-tripo-requests",
+        tabId: tab.id,
+      }).catch(() => null);
+      const captures = [
+        ...(response?.entries || []),
+        ...(stem ? response?.recent || [] : []),
+      ];
+      const match = captures
+        .filter((entry) => entry?.url
+          && (entry.capturedAt || 0) >= startedAt - 1000
+          && tripoModelMatchesStem(entry.url, stem))
+        .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))[0];
+      if (match?.url) return match.url;
     }
   } finally {
     if (tab?.id) chrome.tabs.remove(tab.id).catch(() => {});
   }
 
-  throw new Error("Tripo opened this model without loading a GLB. Open the model in Tripo and try again.");
+  throw new Error("Tripo opened this model without loading its GLB. Open the model in Tripo and try again.");
 }
 
 async function getLibraryFromTab() {
@@ -569,6 +595,12 @@ async function getLibraryFromTab() {
 
 async function resolveLibraryEntry(entry, force = false) {
   if (!entry?.projectId) throw new Error("This model has no Tripo project id.");
+
+  const matchesEntry = (url) => tripoModelMatchesStem(url, entry.stem);
+  if (entry.url && !matchesEntry(entry.url)) {
+    entry.url = "";
+    entry.resolvedAt = 0;
+  }
   if (
     !force
     && entry.url
@@ -579,12 +611,17 @@ async function resolveLibraryEntry(entry, force = false) {
 
   const links = loadModelLinks();
   const cached = links[entry.projectId];
+  const cachedStem = cached?.stem || tripoFileStem(cached?.url);
+  const cachedMatches = !entry.stem
+    || (cachedStem ? entry.stem === cachedStem : tripoModelMatchesStem(cached?.url, entry.stem));
   if (
     !force
     && cached?.url
     && Date.now() - (cached.at || 0) < MODEL_LINK_TTL
+    && cachedMatches
   ) {
     entry.url = cached.url;
+    entry.stem = entry.stem || cachedStem;
     entry.resolvedAt = cached.at;
     if (!entry.name && cached.name) entry.name = cached.name;
     return entry.url;
@@ -605,12 +642,14 @@ async function resolveLibraryEntry(entry, force = false) {
   }
 
   entry.url = response.url;
+  entry.stem = response.stem || tripoFileStem(response.url);
   entry.resolvedAt = Date.now();
   if (!entry.name && response.name) entry.name = response.name;
   links[entry.projectId] = {
     url: entry.url,
     at: entry.resolvedAt,
     name: entry.name || "",
+    stem: entry.stem,
   };
   saveModelLinks(links);
   return entry.url;
@@ -633,6 +672,7 @@ function buildEntries(links, projects) {
     kind: "library",
     projectId: project.id,
     url: "",
+    stem: "",
     resolvedAt: 0,
     capturedAt: Date.parse(project.createdAt) || 0,
     name: project.name || "",
@@ -896,6 +936,7 @@ function rememberModelLink(entry, url, at = Date.now()) {
     url,
     at,
     name: entry.name || "",
+    stem: entry.stem || tripoFileStem(url),
   };
   saveModelLinks(links);
 }
@@ -922,18 +963,23 @@ async function fetchSelectedBuffer() {
   const candidates = [];
   let lastError = null;
   const add = (url) => {
-    if (url && !candidates.includes(url)) candidates.push(url);
+    if (!url || candidates.includes(url)) return;
+    if (entry.stem && !tripoModelMatchesStem(url, entry.stem)) return;
+    candidates.push(url);
   };
 
-  if (entry.url) add(entry.url);
-  add(capturedLinkFor(entry.projectId));
-
   if (entry.projectId) {
+    // The project detail link is the one Tripo names for this project. Prefer
+    // it over viewer captures, which can belong to another library card.
     try {
       add(await resolveLibraryEntry(entry));
-    } catch {
-      // A captured page link or the viewer fallback can still work.
+    } catch (error) {
+      lastError = error;
     }
+    add(entry.url);
+    add(capturedLinkFor(entry.projectId, entry.stem));
+  } else {
+    add(entry.url);
   }
 
   for (const url of [...candidates]) {
@@ -942,6 +988,7 @@ async function fetchSelectedBuffer() {
       const glb = await fetchGlbFromUrl(url);
       if (glb) {
         entry.url = url;
+        entry.stem = entry.stem || tripoFileStem(url);
         entry.resolvedAt = Date.now();
         rememberModelLink(entry, url, entry.resolvedAt);
         return glb;
@@ -973,10 +1020,11 @@ async function fetchSelectedBuffer() {
   }
 
   setStatus("Tripo keeps this model in another format. Opening it to read the GLB...", "busy");
-  const captured = await openProjectAndCapture(entry.projectId);
+  const captured = await openProjectAndCapture(entry.projectId, entry.stem);
   const glb = await fetchGlbFromUrl(captured);
   if (!glb) throw new Error("Tripo loaded this model without a GLB.");
   entry.url = captured;
+  entry.stem = entry.stem || tripoFileStem(captured);
   entry.resolvedAt = Date.now();
   rememberModelLink(entry, captured, entry.resolvedAt);
   return glb;
@@ -1200,7 +1248,7 @@ openDownloadsButton.addEventListener("click", () => {
 clearPreviewsButton.addEventListener("click", clearPreviewCache);
 
 resetSettingsButton.addEventListener("click", () => {
-  settings = { askSave: false, subfolder: "" };
+  settings = { askSave: false, subfolder: "Meshport" };
   saveSettings();
   setFormat("stl");
   syncSettingsUi();

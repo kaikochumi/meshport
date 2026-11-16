@@ -2,7 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "../chrome-extension/shared.js";
 
-const { isTripoGlbUrl, tripoFileStem, tripoLibraryProject, tripoProjectIdFromUrl } = globalThis;
+const {
+  isTripoGlbUrl,
+  tripoFileStem,
+  tripoLibraryProject,
+  tripoModelMatchesStem,
+  tripoProjectIdFromDetailUrl,
+  tripoProjectIdFromUrl,
+} = globalThis;
 
 const MODEL = "https://tripo-data.rg1.data.tripo3d.com/2026/11/15/tripo-studio/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.glb";
 
@@ -30,6 +37,34 @@ test("tripoFileStem returns the model id", () => {
     tripoFileStem("https://tripo-data.rg1.data.tripo3d.com/a/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.glb"),
     "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d",
   );
+});
+
+test("tripoFileStem reads FBX and archive links too", () => {
+  assert.equal(
+    tripoFileStem("https://tripo-data.rg1.data.tripo3d.com/a/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.fbx"),
+    "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d",
+  );
+  assert.equal(
+    tripoFileStem("https://tripo-data.rg1.data.tripo3d.com/a/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d.zip"),
+    "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d",
+  );
+});
+
+test("tripoModelMatchesStem keeps captures of another model out", () => {
+  const survivor = "https://tripo-data.rg1.data.tripo3d.com/a/tripo_pbr_model_23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d_meshopt.glb";
+  const street = "https://tripo-data.rg1.data.tripo3d.com/a/tripo_pbr_model_9d2c71b3-6e54-4f20-8a19-3c5d7e6f8091_meshopt.glb";
+  assert.equal(tripoModelMatchesStem(survivor, "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d"), true);
+  assert.equal(tripoModelMatchesStem(street, "23ff3b1e-7ba5-4977-a492-9d9f2a1c5b3d"), false);
+  assert.equal(tripoModelMatchesStem(street, ""), true);
+});
+
+test("tripoProjectIdFromDetailUrl reads the project detail request", () => {
+  assert.equal(
+    tripoProjectIdFromDetailUrl("https://api.tripo3d.ai/v2/studio/project/detail/v3/ad7cfcb4-92d8-4be0-a90f-2f8d64afa111?operator_id=x"),
+    "ad7cfcb4-92d8-4be0-a90f-2f8d64afa111",
+  );
+  assert.equal(tripoProjectIdFromDetailUrl("https://api.tripo3d.ai/v2/studio/assets/v2"), "");
+  assert.equal(tripoProjectIdFromDetailUrl("nope"), "");
 });
 
 test("tripoProjectIdFromUrl reads the workspace route", () => {
