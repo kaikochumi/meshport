@@ -168,6 +168,31 @@ function entryKey(entry) {
   return entry.projectId || entry.url;
 }
 
+// The popup remembers which model you had picked, so reopening it (or a
+// rescan) lands on the same selection instead of the first card.
+function selectionId(entry) {
+  return entry?.projectId ? `project:${entry.projectId}` : `url:${entry?.url || ""}`;
+}
+
+function rememberSelection(entry) {
+  try {
+    localStorage.setItem("meshport/last-selection", entry ? selectionId(entry) : "");
+  } catch {
+    // The preference is optional.
+  }
+}
+
+function restoreSelection(entries) {
+  let saved = "";
+  try {
+    saved = localStorage.getItem("meshport/last-selection") || "";
+  } catch {
+    return null;
+  }
+  if (!saved) return null;
+  return entries.find((entry) => selectionId(entry) === saved) || null;
+}
+
 function modelLabel(stem) {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stem)) {
     return `Model ${stem.slice(0, 8)}`;
@@ -858,6 +883,7 @@ function selectEntry(entry, focus = false) {
   const changed = key !== selectionKey;
   selectedEntry = entry;
   selectionKey = key;
+  rememberSelection(entry);
 
   for (const button of linksList.querySelectorAll(".model")) {
     const isSelected = button.dataset.key === key;
@@ -887,6 +913,9 @@ function fillLinks(entries) {
   if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
+    const icon = document.createElement("span");
+    icon.className = "empty-icon";
+    icon.innerHTML = MODEL_GLYPH;
     const text = document.createElement("p");
     text.textContent = "No model found. Reload the Tripo tab so Meshport can read your library.";
     const reload = document.createElement("button");
@@ -894,7 +923,7 @@ function fillLinks(entries) {
     reload.className = "empty-reload";
     reload.dataset.action = "reload-tab";
     reload.textContent = "Reload tab";
-    empty.append(text, reload);
+    empty.append(icon, text, reload);
     linksList.append(empty);
     updateActionState();
     return;
@@ -912,7 +941,7 @@ function fillLinks(entries) {
     button.setAttribute("aria-selected", "false");
     button.tabIndex = -1;
     button.style.setProperty("--i", String(Math.min(index, 8)));
-    button.title = entryTitle(entry);
+    button.title = `${entryTitle(entry)}. Double-click downloads with the current format.`;
 
     const thumb = document.createElement("span");
     thumb.className = "model-thumb";
@@ -933,7 +962,7 @@ function fillLinks(entries) {
     cards.push(button);
   });
 
-  selectEntry(entries[0]);
+  selectEntry(restoreSelection(entries) || entries[0]);
   primeThumbnails(entries, cards);
 }
 
@@ -1305,6 +1334,7 @@ function updateFormatUi() {
 }
 
 async function scan() {
+  scanButton.classList.add("spinning");
   try {
     setBusy(true, "Reading your Tripo library...");
     const [linksResult, libraryResult] = await Promise.allSettled([
@@ -1348,6 +1378,7 @@ async function scan() {
   } catch (error) {
     setStatus(`Scan error: ${error.message}`, "error");
   } finally {
+    scanButton.classList.remove("spinning");
     setBusy(false);
   }
 }
@@ -1447,6 +1478,12 @@ linksList.addEventListener("click", (event) => {
     return;
   }
   if (event.target.closest('[data-action="reload-tab"]')) reloadActiveTab();
+});
+
+// Power users: a double-click downloads the card with the current format.
+linksList.addEventListener("dblclick", (event) => {
+  const button = event.target.closest(".model");
+  if (button && !convertButton.disabled) convertButton.click();
 });
 
 linksList.addEventListener("keydown", (event) => {

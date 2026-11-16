@@ -80,14 +80,14 @@
                 <small>One file with everything</small>
               </span>
             </label>
-            <label class="format wide" title="Tripo's native file, exactly as stored. Keeps quad topology for Blender.">
+            <label class="format" title="Tripo's native file, exactly as stored. Keeps quad topology for Blender.">
               <input type="radio" name="format" value="fbx">
               <span class="format-body">
                 <strong>FBX</strong>
                 <small>Native file from Tripo</small>
               </span>
             </label>
-            <label class="format wide" title="Base color, normal and other maps, without the mesh.">
+            <label class="format" title="Base color, normal and other maps, without the mesh.">
               <input type="radio" name="format" value="textures">
               <span class="format-body">
                 <strong>Textures only</strong>
@@ -119,7 +119,7 @@
         <footer>
           <div class="status-row">
             <span class="dot" aria-hidden="true"></span>
-            <p id="status">Ready.</p>
+            <p id="status" aria-live="polite">Ready.</p>
           </div>
           <progress id="progress" hidden></progress>
           <div class="actions">
