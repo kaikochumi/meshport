@@ -14,6 +14,10 @@ const textureBox = document.getElementById("texture-box");
 const starBox = document.getElementById("star-box");
 const starOpen = document.getElementById("star-open");
 const starDismiss = document.getElementById("star-dismiss");
+const platformButtons = {
+  tripo: document.getElementById("platform-tripo"),
+  meshy: document.getElementById("platform-meshy"),
+};
 const textureSummary = document.getElementById("texture-summary");
 const textureList = document.getElementById("texture-list");
 const tabExport = document.getElementById("tab-export");
@@ -211,9 +215,15 @@ function selectionId(entry) {
   return entry?.projectId ? `project:${entry.projectId}` : `url:${entry?.url || ""}`;
 }
 
+// Each platform keeps its own last pick, so switching the source never
+// carries a Tripo selection into Meshy or the other way around.
+function selectionStorageKey() {
+  return `meshport/${platform}/last-selection`;
+}
+
 function rememberSelection(entry) {
   try {
-    localStorage.setItem("meshport/last-selection", entry ? selectionId(entry) : "");
+    localStorage.setItem(selectionStorageKey(), entry ? selectionId(entry) : "");
   } catch {
     // The preference is optional.
   }
@@ -222,12 +232,39 @@ function rememberSelection(entry) {
 function restoreSelection(entries) {
   let saved = "";
   try {
-    saved = localStorage.getItem("meshport/last-selection") || "";
+    saved = localStorage.getItem(selectionStorageKey()) || "";
   } catch {
     return null;
   }
+  if (!saved && platform === "tripo") {
+    // One-time read of the key used before Meshy existed.
+    try {
+      saved = localStorage.getItem("meshport/last-selection") || "";
+    } catch {
+      return null;
+    }
+  }
   if (!saved) return null;
   return entries.find((entry) => selectionId(entry) === saved) || null;
+}
+
+const PLATFORM_KEY = "meshport/platform";
+let platform = loadPlatform();
+
+function loadPlatform() {
+  try {
+    return localStorage.getItem(PLATFORM_KEY) === "meshy" ? "meshy" : "tripo";
+  } catch {
+    return "tripo";
+  }
+}
+
+function rememberPlatform() {
+  try {
+    localStorage.setItem(PLATFORM_KEY, platform);
+  } catch {
+    // The choice is optional.
+  }
 }
 
 function modelLabel(stem) {
@@ -1370,7 +1407,63 @@ function updateFormatUi() {
   pngRow.classList.toggle("disabled", !pngApplies);
 }
 
+// Platform switch. Tripo is live; Meshy shows an honest placeholder until
+// its endpoints are wired in a later commit.
+function fillMeshyPlaceholder() {
+  scanToken += 1; // an in-flight Tripo scan must not overwrite this view
+  selectedEntry = null;
+  selectionKey = "";
+  linksList.replaceChildren();
+  modelCount.textContent = "0";
+  const empty = document.createElement("div");
+  empty.className = "empty";
+  const icon = document.createElement("span");
+  icon.className = "empty-icon";
+  icon.innerHTML = MODEL_GLYPH;
+  const text = document.createElement("p");
+  text.textContent = "Meshy is not wired up yet. The model you have open at app.meshy.ai becomes exportable in an upcoming update.";
+  empty.append(icon, text);
+  linksList.append(empty);
+  updateActionState();
+}
+
+function applyPlatform() {
+  for (const [name, button] of Object.entries(platformButtons)) {
+    button.setAttribute("aria-pressed", String(name === platform));
+  }
+  if (platform === "meshy") {
+    fillMeshyPlaceholder();
+    setStatus("Meshy export is on the way. Tripo works as before.", "idle");
+  } else if (currentModelEntries.length) {
+    fillLinks(currentModelEntries);
+    setStatus("Tripo selected. Showing your last scan.", "idle");
+  } else {
+    linksList.replaceChildren();
+    const prompt = document.createElement("p");
+    prompt.className = "empty";
+    prompt.textContent = "Reading your Tripo library...";
+    linksList.append(prompt);
+    modelCount.textContent = "0";
+    setStatus("Tripo selected. Rescan to read your library.", "idle");
+    updateActionState();
+  }
+}
+
+function setPlatform(next) {
+  if (next === platform) return;
+  platform = next;
+  rememberPlatform();
+  applyPlatform();
+}
+
+platformButtons.tripo.addEventListener("click", () => setPlatform("tripo"));
+platformButtons.meshy.addEventListener("click", () => setPlatform("meshy"));
+
 async function scan() {
+  if (platform === "meshy") {
+    setStatus("Meshy is not wired up yet. Nothing to scan.", "idle");
+    return;
+  }
   scanButton.classList.add("spinning");
   try {
     setBusy(true, "Reading your Tripo library...");
@@ -1384,6 +1477,13 @@ async function scan() {
       ? libraryResult.value.projects || []
       : [];
     const entries = buildEntries(links, projects);
+    if (platform !== "tripo") {
+      // The scan finished while the Meshy view was open. Hold the result so
+      // switching back shows it without a rescan.
+      currentModelEntries = entries.filter((entry) => entry.url || entry.projectId);
+      setStatus("Scan finished while Meshy was open. Switch to Tripo to see the result.", "idle");
+      return;
+    }
     fillLinks(entries);
 
     const count = entries.length;
@@ -1644,9 +1744,12 @@ if (typeof preferences.png === "boolean") pngCheckbox.checked = preferences.png;
 syncSettingsUi();
 versionEl.textContent = chrome.runtime.getManifest().version;
 showView("export");
+applyPlatform();
 updateActionState();
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", scan);
-} else {
-  scan();
+if (platform === "tripo") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", scan);
+  } else {
+    scan();
+  }
 }
