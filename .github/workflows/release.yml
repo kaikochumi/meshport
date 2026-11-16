@@ -25,8 +25,12 @@ jobs:
           body: |
             Meshy joins Tripo.
 
-            The popup now has a Tripo and Meshy switch. On Meshy, it reads the model you have open in your workspace and saves it as STL, OBJ, glTF, GLB, or a zip of textures. Download links expire after a while, so Meshport asks the open tab for a fresh one and retries by itself. There is no FBX on Meshy, because that native file only exists inside a Tripo project.
+            The popup now has a Tripo and a Meshy switch, and each platform keeps its own list and its own theme. On Meshy, Meshport reads the model you have open in your workspace: the page already fetched everything while you worked, and a small script inside the tab hands it over. The extension never calls the Meshy API and needs no login or key. Save the open model as STL, OBJ, glTF, GLB, or a zip of textures. There is no FBX on Meshy, because that native file only exists inside a Tripo project.
+
+            Meshy signs its download links, and the signature runs out after a while. When one does, reload the Meshy tab, open the model again, then rescan: the workspace fetches a fresh link on its own.
 
             Tripo keeps everything from before: the full library with covers, verified downloads, and the native FBX path.
+
+            The thumbnail cache now writes once per scan instead of once per card, and Meshy previews are stored at card size, so the cache stays small and lasts longer. The empty states carry their own buttons: Reload tab on Tripo, Rescan on Meshy.
 
             Install: unpack the zip and load the chrome-extension folder on your browser's extensions page with developer mode on. The README has the full steps. After updating, reload your Tripo and Meshy tabs so the new content scripts go live.
