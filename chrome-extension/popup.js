@@ -1230,7 +1230,11 @@ async function fetchMeshyGlb(entry, allowRefresh = true) {
       entriesByPlatform.meshy = currentModelEntries.slice();
       if (selectedEntry === entry) selectedEntry = fresh;
     }
-    return fetchMeshyGlb(fresh, false);
+    try {
+      return await fetchMeshyGlb(fresh, false);
+    } catch {
+      throw new Error("The Meshy link expired. Reopen the model in Meshy, then rescan.");
+    }
   }
   if (meshportModelKind(bytes) !== "glb") {
     throw new Error("Meshy sent a file Meshport could not read as GLB.");

@@ -286,11 +286,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
-// Meshy. The workspace keeps everything on www.meshy.ai with session
-// cookies, so this content script can do the talking directly. The model
-// you have open is whichever task the page recently asked about
-// (/tasks/{id}/open and /tasks/{id}/status), and the status endpoint
-// answers with a signed GLB link, preview and texture maps.
+// Meshy. The workspace already fetches everything Meshport needs: opening
+// a model triggers /v1/tasks/{id}/status, which answers with the signed
+// GLB link, and the sidebar fetches /v2/tasks, which answers with names
+// and triangle counts. meshy-world.js, running in the page, hands both
+// answers over, so this script reads instead of asking. A direct API call
+// stays as a fallback, stamped with the device id the app itself sends.
 const MESHY_HOST = /(^|\.)meshy\.ai$/i.test(location.hostname);
 const MESHY_TASK_RE = /meshyd-api\/web\/v\d\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const MESHY_TASKS_QUERY = "?excludeWorkspace=true&pageNum=1&pageSize=50"
@@ -313,6 +314,22 @@ function meshyDeviceId() {
   const match = /(?:^|;\s*)meshy_device_id=([^;]+)/.exec(document.cookie || "");
   return match ? decodeURIComponent(match[1]) : "";
 }
+
+// Answers the workspace already received, relayed by meshy-world.js.
+const meshyStatusByTask = new Map();
+let meshyTaskList = [];
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (data?.source !== "meshport" || data.type !== "meshy-capture") return;
+  if (data.status?.id && data.status.modelUrl) {
+    meshyStatusByTask.set(data.status.id, data.status);
+  }
+  if (Array.isArray(data.list) && data.list.length) {
+    meshyTaskList = data.list;
+  }
+});
 
 function meshyOpenTaskId() {
   let latest = null;
@@ -359,44 +376,39 @@ async function meshyJson(path, step) {
   return payload.result;
 }
 
-function meshyTaskCard(task) {
-  if (!task || typeof task !== "object") return null;
-  return {
-    name: typeof task.name === "string" ? task.name : "",
-    counts: {
-      triangles: Number(task.triangleCount) || 0,
-      vertices: Number(task.vertexCount) || 0,
-    },
-    createdAt: Number(task.createdAt) || 0,
-    taskStatus: String(task.status || ""),
-  };
-}
-
 async function meshyModel() {
   const taskId = meshyOpenTaskId();
   if (!taskId) {
     return { ok: false, error: "Open a model in your Meshy workspace, then rescan." };
   }
 
-  const [statusSettled, listSettled] = await Promise.allSettled([
-    meshyJson(`/v1/tasks/${taskId}/status`, "read the model"),
-    meshyJson(`/v2/tasks${MESHY_TASKS_QUERY}`, "read the library"),
-  ]);
-  if (statusSettled.status === "rejected") {
-    return { ok: false, error: statusSettled.reason.message };
+  // Primary source: the answer the workspace itself received when you
+  // opened the model, captured from inside the page.
+  let info = meshyStatusByTask.get(taskId) || null;
+
+  if (!info?.modelUrl) {
+    // Fallback: ask the API directly, the way the workspace does.
+    const [statusSettled, listSettled] = await Promise.allSettled([
+      meshyJson(`/v1/tasks/${taskId}/status`, "read the model"),
+      meshyJson(`/v2/tasks${MESHY_TASKS_QUERY}`, "read the library"),
+    ]);
+    if (statusSettled.status === "rejected") {
+      return { ok: false, error: statusSettled.reason.message };
+    }
+    if (listSettled.status === "fulfilled" && Array.isArray(listSettled.value)) {
+      meshyTaskList = listSettled.value;
+    }
+    // meshyJson already unwraps payload.result, so the status answer is
+    // the model info itself.
+    info = statusSettled.value || {};
   }
 
-  // meshyJson already unwraps payload.result, so the status answer is the
-  // model info itself.
-  const info = statusSettled.value || {};
   const modelUrl = typeof info.modelUrl === "string" ? info.modelUrl : "";
   if (!modelUrl || !/^https:\/\/assets\.meshy\.ai\//i.test(modelUrl)) {
     return { ok: false, error: "Meshy has no GLB ready for this model yet." };
   }
 
-  const card = listSettled.status === "fulfilled" && Array.isArray(listSettled.value)
-    ? meshyTaskCard(listSettled.value.find((task) => task.id === taskId))
-    : null;
+  const task = meshyTaskList.find((item) => item.id === taskId) || null;
 
   return {
     ok: true,
@@ -404,10 +416,13 @@ async function meshyModel() {
       kind: "meshy",
       projectId: taskId,
       url: modelUrl,
-      name: card?.name || "",
+      name: task?.name || "",
       previewUrl: typeof info.previewUrl === "string" ? info.previewUrl : "",
-      textures: Array.isArray(info.textureUrls) ? info.textureUrls.filter((item) => item && typeof item === "object") : [],
-      counts: card?.counts || { triangles: 0, vertices: 0 },
+      textures: [],
+      counts: {
+        triangles: Number(task?.triangleCount) || 0,
+        vertices: Number(task?.vertexCount) || 0,
+      },
     },
   };
 }

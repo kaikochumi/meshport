@@ -62,6 +62,17 @@
         "*://*.meshy.ai/*"
       ],
       "js": [
+        "meshy-world.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://meshy.ai/*",
+        "*://*.meshy.ai/*"
+      ],
+      "js": [
         "shared.js",
         "content.js"
       ],
