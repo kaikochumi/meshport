@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip the extension
+        run: zip -qr "../meshport-${{ github.ref_name }}.zip" chrome-extension
+
+      # Update the body below when you tag the next version.
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Meshport ${{ github.ref_name }}
+          files: meshport-${{ github.ref_name }}.zip
+          body: |
+            This is the first release of Meshport.
+
+            The extension reads the library you already have open in Tripo Studio and saves each model as STL, OBJ, glTF, GLB, FBX, or a zip of textures. Files come out without meshopt or quantization, so Blender and slicers open them right away.
+
+            Install: unpack the zip and load the chrome-extension folder on your browser's extensions page with developer mode on. The README has the full steps.
