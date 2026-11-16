@@ -1,0 +1,39 @@
+name: Bug report
+description: Something downloads the wrong file, fails, or renders wrong
+labels: [bug]
+body:
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Source platform
+      options:
+        - Tripo Studio
+        - Meshy
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: Chrome 157 / Edge 157
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, step by step
+      placeholder: Opened the model, switched the source to Meshy, clicked download...
+    validations:
+      required: true
+  - type: textarea
+    id: console
+    attributes:
+      label: Console lines
+      description: Right-click the Meshport icon, choose Inspect popup, and open the Console tab. Paste the lines that start with [Meshport].
+      render: shell
+  - type: textarea
+    id: download-decision
+    attributes:
+      label: Download decision
+      description: From that same console, run JSON.parse(localStorage["meshport/last-download"]) and paste the result.
+      render: json

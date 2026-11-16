@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.png" alt="Meshport, a Tripo Studio exporter" width="100%">
+  <img src="docs/banner.png" alt="Meshport, a Tripo Studio and Meshy exporter" width="100%">
 </p>
 
 <h1 align="center">Meshport</h1>
@@ -12,6 +12,12 @@
 
 Meshport is a browser extension that exports models from Tripo Studio and Meshy. On Tripo it reads your whole library with the session already open, fetches each model, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, FBX, or a zip of textures. On Meshy it exports the model you have open in your workspace. It does not call any paid export API or spend export credits, and your models never leave the browser.
 
+| | [Tripo Studio](https://studio.tripo3d.ai) | [Meshy](https://www.meshy.ai) |
+| --- | --- | --- |
+| What it exports | Your whole library, newest first | The model open in your workspace |
+| Formats | STL, OBJ, glTF, GLB, FBX, textures | STL, OBJ, glTF, GLB, textures |
+| Session | Your browser session | Your browser session |
+
 Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`, which Blender, PrusaSlicer, and most other tools do not open. Meshport strips both extensions before it writes the output, so the files open in Blender, in slicers, and in game engines.
 
 <p align="center">
@@ -20,11 +26,21 @@ Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`, 
 
 ## Features
 
-- The source switch at the top of the popup chooses between Tripo and Meshy. Each side keeps its own scan, selection, and colors, so switching never mixes one platform's models into the other.
+The source switch at the top of the popup chooses between Tripo and Meshy. Each side keeps its own scan, selection, and colors, so switching never mixes one platform's models into the other.
+
+### On Tripo
+
 - My Assets and Collected appear with their Tripo covers, newest first. Models without a cover get a preview rendered from the GLB, cached for the next open.
 - The FBX card downloads Tripo's native file exactly as stored, with quad topology intact for Blender. It skips conversion and re-encoding entirely.
 - Downloads resolve through the project detail and get verified against the ids Tripo embeds inside the file, so a preview of another asset never wins.
-- Inspect shows the triangle count, the texture list, and texture sizes without saving anything.
+
+### On Meshy
+
+- Meshport reads the model you have open in the workspace. The page already fetched everything while you worked, and a script inside the tab hands it over, so the extension never calls the Meshy API and needs no login or key.
+- The thumbnail comes from the render Meshy already made.
+- A signed link that runs out says so plainly: reload the Meshy tab, open the model, then rescan.
+
+Both platforms share `Inspect`, which decodes the model without saving it and shows the triangle count, the texture list, and texture sizes.
 
 ## Install
 
@@ -40,13 +56,13 @@ To update, replace the folder and click the reload button on the extensions page
 
 ## Usage
 
+### Tripo Studio
+
 1. Open [Tripo Studio](https://studio.tripo3d.ai) and sign in.
 2. Reload the Tripo tab after installing or updating Meshport, so the new content script is active.
 3. Click the Meshport icon. The popup lists your library, newest first.
 4. Pick a model, change the file name if you want, and choose a format. Double-clicking a model downloads it with the current format.
 5. Click the download button.
-
-Meshport remembers your selected model, format, and settings between uses.
 
 ### Meshy
 
@@ -56,9 +72,9 @@ Meshport remembers your selected model, format, and settings between uses.
 
 Meshy exports as STL, OBJ, glTF, GLB, or a zip of textures. The thumbnail comes from the render Meshy already made. If a download link runs out, reload the Meshy tab, open the model, then rescan.
 
-The Settings tab sets a subfolder inside Downloads, switches the download to ask for a folder each time, and picks the default format.
+### Both
 
-`Inspect` decodes the model without saving it and shows the textures, their sizes, and the triangle count.
+Meshport remembers your selected model, format, and settings between uses. The Settings tab sets a subfolder inside Downloads, switches the download to ask for a folder each time, and picks the default format. `Inspect` decodes the model without saving it and shows the triangle count, the texture list, and texture sizes.
 
 ## Formats
 
@@ -108,6 +124,8 @@ npm test
 ```
 
 The suite covers the GLB parser, texture extraction, OBJ and MTL output, the zip writer, the glTF package builder, the meshopt decode path, library card parsing, and model file detection. It runs against `test/fixtures/cube-meshopt.glb`, a cube compressed with `gltfpack -cc`.
+
+`npm run test:e2e` drives a real browser through both platforms: the Tripo library, the Meshy scan, the round trip, and a full Meshy download. It looks for Edge in the standard install location; set `MESHPORT_EDGE_PATH` when it lives elsewhere.
 
 Rebuild the decoder bundle after upgrading glTF Transform or meshoptimizer:
 

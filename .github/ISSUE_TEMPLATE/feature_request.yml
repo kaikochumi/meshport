@@ -1,0 +1,17 @@
+name: Feature idea
+description: A format, a platform, or a behavior you would change
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The job matters more than the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you picture
+    validations:
+      required: true
