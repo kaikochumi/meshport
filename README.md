@@ -29,7 +29,7 @@ Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`, 
 
 Meshport is not on the Chrome Web Store. Load it from the folder:
 
-1. Download or clone this repository.
+1. Download the [extension zip](https://github.com/kaikochumi/meshport/releases/latest) or clone this repository.
 2. Open `chrome://extensions` in Chrome or `edge://extensions` in Edge.
 3. Turn on `Developer mode`.
 4. Click `Load unpacked` and select the `chrome-extension` folder.
