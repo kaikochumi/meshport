@@ -1239,7 +1239,9 @@ async function fetchMeshyGlb(entry, allowRefresh = true) {
   if (meshportModelKind(bytes) !== "glb") {
     throw new Error("Meshy sent a file Meshport could not read as GLB.");
   }
-  return bytes;
+  // Callers hand the result to the converter sandbox as a transfer, and only
+  // an ArrayBuffer is transferable.
+  return bytes.buffer;
 }
 
 async function fetchSelectedBuffer() {
