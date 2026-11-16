@@ -286,6 +286,14 @@ function baseNameFromEntry(entry) {
 }
 
 function entryMeta(entry) {
+  if (entry.kind === "meshy") {
+    const tris = Number(entry.counts?.triangles) || 0;
+    if (!tris) return "Open in Meshy";
+    const label = tris >= 10000
+      ? `${(tris / 1000).toFixed(1)}k tris`
+      : `${tris.toLocaleString("en-US")} tris`;
+    return `Open in Meshy · ${label}`;
+  }
   if (entry.kind === "library") {
     const scope = entry.scope === "collected" ? "Collected" : "My Assets";
     if (!entry.capturedAt) return scope;
@@ -318,6 +326,27 @@ async function generateThumbnail(entry, card, token, key) {
   if (token !== scanToken || !card.isConnected) return;
 
   try {
+    if (entry.kind === "meshy") {
+      // Meshy serves a finished render for the open model. Grab it instead
+      // of decoding the whole GLB for a picture.
+      if (!entry.previewUrl) return;
+      const image = await fetch(entry.previewUrl, { credentials: "omit" });
+      if (!image.ok) return;
+      const blob = await image.blob();
+      if (token !== scanToken || !card.isConnected) return;
+      const dataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => resolve("");
+        reader.readAsDataURL(blob);
+      });
+      if (!dataUrl.startsWith("data:image/")) return;
+      thumbnailCache[key] = dataUrl;
+      saveThumbnailCache();
+      updatePreviewCount();
+      setThumbnail(card, dataUrl);
+      return;
+    }
     let thumbUrl = isTripoGlbUrl(entry.url) ? entry.url : "";
     if (!thumbUrl && entry.projectId) {
       try {
@@ -1132,7 +1161,7 @@ async function askSandbox({ type, key, buffer, format, options, baseName }, time
   });
 }
 
-async function fetchArrayBuffer(url) {
+async function fetchArrayBuffer(url, owner = "Tripo") {
   let response;
   try {
     response = await fetch(url, { credentials: "omit", redirect: "follow" });
@@ -1140,7 +1169,7 @@ async function fetchArrayBuffer(url) {
     throw new Error(`Download failed: ${error.message}. Reload the model page and try again.`);
   }
   if (response.status === 403) {
-    throw new Error("The Tripo download link expired.");
+    throw new Error(`The ${owner} download link expired.`);
   }
   if (!response.ok) {
     throw new Error(`Download failed: ${response.status} ${response.statusText}`);
@@ -1184,9 +1213,41 @@ async function fetchGlbFromUrl(url) {
 // or .zip link, so skip the rest instead of downloading the whole file first.
 const NON_GLB_URL = /\.(?:fbx|obj|gltf|usdz|dae|stl|ply)(?:$|[?#])/i;
 
+// Meshy signs its GLB links and the signature expires. When a download
+// comes back expired, ask the Meshy tab for a fresh link and retry once.
+async function fetchMeshyGlb(entry, allowRefresh = true) {
+  let bytes;
+  try {
+    bytes = new Uint8Array(await fetchArrayBuffer(entry.url, "Meshy"));
+  } catch (error) {
+    if (!allowRefresh || !isExpiredLinkError(error)) throw error;
+    setBusy(true, "Refreshing the Meshy link...");
+    const response = await getMeshyModelResponse();
+    const fresh = meshyEntryFrom(response.model);
+    if (entryKey(fresh) === entryKey(entry)) {
+      const index = currentModelEntries.findIndex((item) => entryKey(item) === entryKey(entry));
+      if (index >= 0) currentModelEntries[index] = fresh;
+      entriesByPlatform.meshy = currentModelEntries.slice();
+      if (selectedEntry === entry) selectedEntry = fresh;
+    }
+    return fetchMeshyGlb(fresh, false);
+  }
+  if (meshportModelKind(bytes) !== "glb") {
+    throw new Error("Meshy sent a file Meshport could not read as GLB.");
+  }
+  return bytes;
+}
+
 async function fetchSelectedBuffer() {
   const entry = selectedEntry;
-  if (!entry) throw new Error("No Tripo model selected.");
+  if (!entry) throw new Error("No model selected.");
+  if (entry.kind === "meshy") {
+    logDownload("download-start", {
+      projectId: entry.projectId,
+      name: entry.name,
+    });
+    return fetchMeshyGlb(entry);
+  }
 
   await refreshCapturedModels();
   logDownload("download-start", {
@@ -1404,10 +1465,14 @@ function updateFormatUi() {
   pngRow.classList.toggle("disabled", !pngApplies);
 }
 
-// Platform switch. Tripo is live; Meshy shows an honest placeholder until
-// its endpoints are wired in a later commit.
-function fillMeshyPlaceholder() {
+// Platform state. Each platform keeps its own last list, so switching the
+// source never carries a Meshy card into Tripo or the other way around.
+const entriesByPlatform = { tripo: [], meshy: [] };
+
+function renderMeshyEmpty(message) {
   scanToken += 1; // an in-flight Tripo scan must not overwrite this view
+  currentModelEntries = [];
+  entriesByPlatform.meshy = [];
   selectedEntry = null;
   selectionKey = "";
   linksList.replaceChildren();
@@ -1418,22 +1483,30 @@ function fillMeshyPlaceholder() {
   icon.className = "empty-icon";
   icon.innerHTML = MODEL_GLYPH;
   const text = document.createElement("p");
-  text.textContent = "Meshy is not wired up yet. The next update exports the model you have open at app.meshy.ai.";
+  text.textContent = message;
   empty.append(icon, text);
   linksList.append(empty);
   updateActionState();
 }
 
-function applyPlatform() {
+function renderPlatformView() {
   document.body.dataset.platform = platform;
   for (const [name, button] of Object.entries(platformButtons)) {
     button.setAttribute("aria-pressed", String(name === platform));
   }
+  const list = entriesByPlatform[platform];
   if (platform === "meshy") {
-    fillMeshyPlaceholder();
-    setStatus("Meshy export is on the way. Tripo works as before.", "idle");
-  } else if (currentModelEntries.length) {
-    fillLinks(currentModelEntries);
+    if (list.length) {
+      fillLinks(list);
+      setStatus("Meshy selected. Showing your last scan.", "idle");
+    } else {
+      renderMeshyEmpty("Open a model in your Meshy workspace, then rescan.");
+      setStatus("Meshy selected. Open a model at meshy.ai, then rescan.", "idle");
+    }
+    return;
+  }
+  if (list.length) {
+    fillLinks(list);
     setStatus("Tripo selected. Showing your last scan.", "idle");
   } else {
     linksList.replaceChildren();
@@ -1449,19 +1522,85 @@ function applyPlatform() {
 
 function setPlatform(next) {
   if (next === platform) return;
+  entriesByPlatform[platform] = currentModelEntries.slice();
   platform = next;
   rememberPlatform();
-  applyPlatform();
+  renderPlatformView();
+  scan();
 }
 
 platformButtons.tripo.addEventListener("click", () => setPlatform("tripo"));
 platformButtons.meshy.addEventListener("click", () => setPlatform("meshy"));
 
-async function scan() {
-  if (platform === "meshy") {
-    setStatus("Meshy is not wired up yet. Nothing to scan.", "idle");
-    return;
+// Meshy. The workspace keeps its API on www.meshy.ai with session cookies,
+// so the tab's content script answers with the open model and a fresh
+// signed GLB link.
+async function getMeshyModelResponse() {
+  const MESHY_TAB_URLS = ["*://*.meshy.ai/*"];
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: MESHY_TAB_URLS });
+  } catch {
+    tabs = [];
   }
+  if (!tabs.length) {
+    throw new Error("Open your Meshy workspace in a browser tab, then rescan.");
+  }
+  let active = null;
+  try {
+    [active] = await chrome.tabs.query({ active: true, currentWindow: true, url: MESHY_TAB_URLS });
+  } catch {
+    active = null;
+  }
+  const ordered = active?.id ? [active, ...tabs.filter((tab) => tab.id !== active.id)] : tabs;
+  let responseError = "";
+  let unreachable = false;
+  for (const tab of ordered) {
+    try {
+      const response = await chrome.tabs.sendMessage(tab.id, { type: "get-meshy-model" });
+      if (response?.ok) return response;
+      if (response?.error) responseError = response.error;
+    } catch {
+      unreachable = true;
+    }
+  }
+  throw new Error(
+    responseError
+      || (unreachable ? "Reload the Meshy tab so Meshport can read your session." : "Meshy did not answer."),
+  );
+}
+
+function meshyEntryFrom(model) {
+  return {
+    ...model,
+    capturedAt: Date.now(),
+    resolvedAt: Date.now(),
+  };
+}
+
+async function scanMeshy() {
+  scanButton.classList.add("spinning");
+  const myPlatform = platform;
+  try {
+    setBusy(true, "Reading your Meshy model...");
+    const response = await getMeshyModelResponse();
+    if (platform !== myPlatform) return; // the user switched away mid-scan
+    const entry = meshyEntryFrom(response.model);
+    fillLinks([entry]);
+    entriesByPlatform.meshy = currentModelEntries.slice();
+    setStatus(`${entryTitle(entry)} is ready. Pick a format and download.`, "ok");
+  } catch (error) {
+    if (platform !== myPlatform) return;
+    renderMeshyEmpty(error.message);
+    setStatus(error.message, "error");
+  } finally {
+    scanButton.classList.remove("spinning");
+    setBusy(false);
+  }
+}
+
+async function scan() {
+  if (platform === "meshy") return scanMeshy();
   scanButton.classList.add("spinning");
   try {
     setBusy(true, "Reading your Tripo library...");
@@ -1478,11 +1617,12 @@ async function scan() {
     if (platform !== "tripo") {
       // The scan finished while the Meshy view was open. Hold the result so
       // switching back shows it without a rescan.
-      currentModelEntries = entries.filter((entry) => entry.url || entry.projectId);
+      entriesByPlatform.tripo = entries.filter((entry) => entry.url || entry.projectId);
       setStatus("Scan finished while Meshy was open. Switch to Tripo to see the result.", "idle");
       return;
     }
     fillLinks(entries);
+    entriesByPlatform.tripo = currentModelEntries.slice();
 
     const count = entries.length;
     const libraryError = libraryResult.status === "rejected"
@@ -1647,13 +1787,13 @@ linksList.addEventListener("keydown", (event) => {
 inspectButton.addEventListener("click", async () => {
   const entry = selectedEntry;
   if (!entry) {
-    setStatus("No Tripo model selected.", "error");
+    setStatus("No model selected.", "error");
     return;
   }
 
   const key = selectionKey;
   try {
-    setBusy(true, inspectedKey === key ? "Reading textures..." : "Downloading Tripo GLB...");
+    setBusy(true, inspectedKey === key ? "Reading textures..." : "Downloading the GLB...");
     const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
     setBusy(true, "Decoding meshopt...");
     const response = await runSandboxJob({
@@ -1680,13 +1820,17 @@ inspectButton.addEventListener("click", async () => {
 convertButton.addEventListener("click", async () => {
   const entry = selectedEntry;
   if (!entry) {
-    setStatus("No Tripo model selected.", "error");
+    setStatus("No model selected.", "error");
     return;
   }
 
   const key = selectionKey;
   try {
     const format = currentFormat();
+    if (format === "fbx" && platform === "meshy") {
+      setStatus("Meshport reads only the GLB from Meshy. FBX is Tripo-only.", "error");
+      return;
+    }
     if (format === "fbx") {
       const native = await fetchNativeModel(entry);
       const mimeType = native.ext === "zip"
@@ -1703,7 +1847,7 @@ convertButton.addEventListener("click", async () => {
       return;
     }
 
-    setBusy(true, inspectedKey === key ? "Building output..." : "Downloading Tripo GLB...");
+    setBusy(true, inspectedKey === key ? "Building output..." : "Downloading the GLB...");
     const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
     setBusy(true, FORMAT_PROGRESS[format] || "Converting...");
     const response = await convertSelected(key, format, buffer, currentBaseName(entry));
@@ -1734,12 +1878,10 @@ if (typeof preferences.png === "boolean") pngCheckbox.checked = preferences.png;
 syncSettingsUi();
 versionEl.textContent = chrome.runtime.getManifest().version;
 showView("export");
-applyPlatform();
+renderPlatformView();
 updateActionState();
-if (platform === "tripo") {
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", scan);
-  } else {
-    scan();
-  }
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", scan);
+} else {
+  scan();
 }

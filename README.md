@@ -7,10 +7,10 @@
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-c9f75a?style=flat" alt="MIT license"></a>
   <a href="https://github.com/kaikochumi/meshport/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/kaikochumi/meshport/test.yml?branch=main&label=tests&color=c9f75a&style=flat" alt="Tests"></a>
-  <img src="https://img.shields.io/badge/version-0.3.4-111318?style=flat" alt="Version 0.3.4">
+  <img src="https://img.shields.io/badge/version-0.4.0-111318?style=flat" alt="Version 0.4.0">
 </p>
 
-Meshport is a browser extension that exports models from your Tripo Studio library. It reads the library with the session already open in Tripo, fetches each model, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, FBX, or a zip of textures. It does not call the Tripo export API or spend export credits, and your models never leave the browser.
+Meshport is a browser extension that exports models from Tripo Studio and Meshy. On Tripo it reads your whole library with the session already open, fetches each model, decodes it in the browser, and saves it as STL, OBJ, glTF, GLB, FBX, or a zip of textures. On Meshy it exports the model you have open in your workspace. It does not call any paid export API or spend export credits, and your models never leave the browser.
 
 Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`, which Blender, PrusaSlicer, and most other tools do not open. Meshport strips both extensions before it writes the output, so the files open in Blender, in slicers, and in game engines.
 
@@ -20,6 +20,7 @@ Tripo serves models with `EXT_meshopt_compression` and `KHR_mesh_quantization`, 
 
 ## Features
 
+- The source switch at the top of the popup chooses between Tripo and Meshy. Each side keeps its own scan, selection, and colors, so switching never mixes one platform's models into the other.
 - My Assets and Collected appear with their Tripo covers, newest first. Models without a cover get a preview rendered from the GLB, cached for the next open.
 - The FBX card downloads Tripo's native file exactly as stored, with quad topology intact for Blender. It skips conversion and re-encoding entirely.
 - Downloads resolve through the project detail and get verified against the ids Tripo embeds inside the file, so a preview of another asset never wins.
@@ -47,6 +48,14 @@ To update, replace the folder and click the reload button on the extensions page
 
 Meshport remembers your selected model, format, and settings between uses.
 
+### Meshy
+
+1. Open your [Meshy workspace](https://www.meshy.ai/workspace) and open a model.
+2. Click the Meshport icon and switch the source to Meshy. The popup scans by itself and lists the open model with its name and triangle count.
+3. Pick a format and download.
+
+Meshy exports as STL, OBJ, glTF, GLB, or a zip of textures. The thumbnail comes from the render Meshy already made. If a download link expires, Meshport asks the open tab for a fresh one and retries on its own.
+
 The Settings tab sets a subfolder inside Downloads, switches the download to ask for a folder each time, and picks the default format.
 
 `Inspect` decodes the model without saving it and shows the textures, their sizes, and the triangle count.
@@ -65,6 +74,8 @@ The Settings tab sets a subfolder inside Downloads, switches the download to ask
 STL cannot store textures. Use OBJ or glTF when you need the maps.
 
 FBX downloads the file Tripo keeps for the project. When Tripo stores a GLB or a zip instead, Meshport saves that and says so in the status line.
+
+On Meshy there is no FBX. The native FBX file only exists inside a Tripo project, so Meshport reads the GLB and converts from there.
 
 ## How the right model is picked
 
@@ -86,6 +97,8 @@ Tripo signs model links and they expire after a few minutes, so Meshport starts 
 **A download says the link expired.** The signed link ran out. Meshport refreshes it once automatically; open the model in Tripo and rescan if it keeps failing.
 
 **The library is empty.** Reload the Tripo tab so the content script can read the session, then rescan.
+
+**Meshy has nothing to export.** The popup reads the model you currently have open. Open a model in your workspace, then rescan. If it still fails, reload the Meshy tab so the content script is active.
 
 ## Development
 

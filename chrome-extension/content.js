@@ -285,3 +285,112 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 });
+
+// Meshy. The workspace keeps everything on www.meshy.ai with session
+// cookies, so this content script can do the talking directly. The model
+// you have open is whichever task the page recently asked about
+// (/tasks/{id}/open and /tasks/{id}/status), and the status endpoint
+// answers with a signed GLB link, preview and texture maps.
+const MESHY_HOST = /(^|\.)meshy\.ai$/i.test(location.hostname);
+const MESHY_TASK_RE = /meshyd-api\/web\/v\d\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const MESHY_TASKS_QUERY = "?excludeWorkspace=true&pageNum=1&pageSize=50"
+  + "&phases=draft&phases=generate&phases=texture&phases=image-to-3d-texture&phases=stylize"
+  + "&phases=animate&phases=auto-uv&phases=part-segmentation&phases=model-edit&phases=relief"
+  + "&sortBy=-created_at";
+
+function meshyOpenTaskId() {
+  let latest = null;
+  for (const entry of performance.getEntriesByType("resource")) {
+    const match = MESHY_TASK_RE.exec(entry.name || "");
+    if (!match) continue;
+    if (!latest || entry.startTime >= latest.at) latest = { id: match[1], at: entry.startTime };
+  }
+  return latest?.id || "";
+}
+
+async function meshyJson(path, step) {
+  let response;
+  try {
+    response = await fetch(`https://${location.host}/meshyd-api/web${path}`, {
+      credentials: "include",
+    });
+  } catch {
+    throw new Error(`Could not reach Meshy to ${step}. Reload the Meshy tab and try again.`);
+  }
+  const text = await response.text();
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error(`Meshy returned HTTP ${response.status} when trying to ${step}.`);
+  }
+  if (!response.ok || payload?.code !== "OK") {
+    throw new Error(
+      payload?.message || `Meshy returned HTTP ${response.status} when trying to ${step}.`,
+    );
+  }
+  return payload.result;
+}
+
+function meshyTaskCard(task) {
+  if (!task || typeof task !== "object") return null;
+  return {
+    name: typeof task.name === "string" ? task.name : "",
+    counts: {
+      triangles: Number(task.triangleCount) || 0,
+      vertices: Number(task.vertexCount) || 0,
+    },
+    createdAt: Number(task.createdAt) || 0,
+    taskStatus: String(task.status || ""),
+  };
+}
+
+async function meshyModel() {
+  const taskId = meshyOpenTaskId();
+  if (!taskId) {
+    return { ok: false, error: "Open a model in your Meshy workspace, then rescan." };
+  }
+
+  const [statusSettled, listSettled] = await Promise.allSettled([
+    meshyJson(`/v1/tasks/${taskId}/status`, "read the model"),
+    meshyJson(`/v2/tasks${MESHY_TASKS_QUERY}`, "read the library"),
+  ]);
+  if (statusSettled.status === "rejected") {
+    return { ok: false, error: statusSettled.reason.message };
+  }
+
+  // meshyJson already unwraps payload.result, so the status answer is the
+  // model info itself.
+  const info = statusSettled.value || {};
+  const modelUrl = typeof info.modelUrl === "string" ? info.modelUrl : "";
+  if (!modelUrl || !/^https:\/\/assets\.meshy\.ai\//i.test(modelUrl)) {
+    return { ok: false, error: "Meshy has no GLB ready for this model yet." };
+  }
+
+  const card = listSettled.status === "fulfilled" && Array.isArray(listSettled.value)
+    ? meshyTaskCard(listSettled.value.find((task) => task.id === taskId))
+    : null;
+
+  return {
+    ok: true,
+    model: {
+      kind: "meshy",
+      projectId: taskId,
+      url: modelUrl,
+      name: card?.name || "",
+      previewUrl: typeof info.previewUrl === "string" ? info.previewUrl : "",
+      textures: Array.isArray(info.textureUrls) ? info.textureUrls.filter((item) => item && typeof item === "object") : [],
+      counts: card?.counts || { triangles: 0, vertices: 0 },
+    },
+  };
+}
+
+if (MESHY_HOST) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "get-meshy-model") return;
+    meshyModel()
+      .then((response) => sendResponse(response))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  });
+}
