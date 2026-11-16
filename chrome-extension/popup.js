@@ -11,6 +11,9 @@ const statusEl = document.getElementById("status");
 const progress = document.getElementById("progress");
 const sandboxFrame = document.getElementById("sandbox");
 const textureBox = document.getElementById("texture-box");
+const starBox = document.getElementById("star-box");
+const starOpen = document.getElementById("star-open");
+const starDismiss = document.getElementById("star-dismiss");
 const textureSummary = document.getElementById("texture-summary");
 const textureList = document.getElementById("texture-list");
 const tabExport = document.getElementById("tab-export");
@@ -97,6 +100,40 @@ function logDownload(event, data = {}) {
   } catch {
     // Logging is best effort.
   }
+}
+
+// A quiet ask for a GitHub star. It waits until exports clearly work (the
+// second saved file) and stays hidden once starred or refused.
+const REPO_URL = "https://github.com/kaikochumi/meshport";
+const STAR_KEY = "meshport/star-prompt";
+
+function starState() {
+  try {
+    return JSON.parse(localStorage.getItem(STAR_KEY) || "null") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveStarState(state) {
+  try {
+    localStorage.setItem(STAR_KEY, JSON.stringify(state));
+  } catch {
+    // The prompt is optional.
+  }
+}
+
+function showStarPrompt() {
+  starBox.hidden = false;
+}
+
+function noteDownloadSuccess() {
+  const state = starState();
+  state.downloads = (state.downloads || 0) + 1;
+  if (state.choice !== "starred" && state.choice !== "never" && state.downloads >= 2) {
+    showStarPrompt();
+  }
+  saveStarState(state);
 }
 
 function sandboxReady() {
@@ -1458,6 +1495,21 @@ openDownloadsButton.addEventListener("click", () => {
 
 clearPreviewsButton.addEventListener("click", clearPreviewCache);
 
+starOpen.addEventListener("click", () => {
+  const state = starState();
+  state.choice = "starred";
+  saveStarState(state);
+  starBox.hidden = true;
+  chrome.tabs.create({ url: REPO_URL });
+});
+
+starDismiss.addEventListener("click", () => {
+  const state = starState();
+  state.choice = "never";
+  saveStarState(state);
+  starBox.hidden = true;
+});
+
 resetSettingsButton.addEventListener("click", () => {
   settings = { askSave: false, subfolder: "Meshport" };
   saveSettings();
@@ -1556,6 +1608,7 @@ convertButton.addEventListener("click", async () => {
       setBusy(true, FORMAT_SAVE.fbx);
       await downloadBlob(new Blob([native.bytes], { type: mimeType }), fileName);
       logDownload("chosen-native", { ext: native.ext });
+      noteDownloadSuccess();
       setStatus(`${fileName} saved${native.note ? ` · ${native.note}` : ""}.`, "ok");
       return;
     }
@@ -1569,6 +1622,7 @@ convertButton.addEventListener("click", async () => {
     const { result } = response;
     setBusy(true, FORMAT_SAVE[format] || "Saving file...");
     await downloadBlob(new Blob([result.bytes], { type: result.mimeType }), result.fileName);
+    noteDownloadSuccess();
 
     if (textureBox.hidden) renderTextures(response.stats, lastPreviews);
     const summary = describeStats(response.stats);
