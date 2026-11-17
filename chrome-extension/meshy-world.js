@@ -11,11 +11,39 @@
   const STATUS_RE = /meshyd-api\/web\/v1\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/status/i;
   const LIST_RE = /meshyd-api\/web\/v2\/tasks(?:\?|$)/i;
 
+  // The workspace often fetches its first list before the content script is
+  // ready to listen. Keep the answers here and replay them when asked, so a
+  // late listener still gets the signed links the page already received.
+  const taskList = new Map();
+  const statusById = new Map();
+
   function send(payload) {
     try {
       window.postMessage({ source: "meshport", type: "meshy-capture", ...payload }, "*");
     } catch {
       // Navigation can kill the page mid-capture.
+    }
+  }
+
+  function listSnapshot() {
+    return [...taskList.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
+  function rememberList(slim) {
+    for (const item of slim) {
+      const previous = taskList.get(item.id);
+      // A later list request may come from a filtered view with less data.
+      // Never let a missing field erase a name, date, count, or signed link
+      // captured earlier; only a real value replaces the previous one.
+      const next = { ...previous, ...item };
+      for (const key of ["name", "status", "phase", "previewUrl", "modelUrl",
+        "triangleCount", "vertexCount", "createdAt"]) {
+        const value = item[key];
+        if ((value === "" || value == null || value === 0) && previous?.[key]) {
+          next[key] = previous[key];
+        }
+      }
+      taskList.set(item.id, next);
     }
   }
 
@@ -27,14 +55,14 @@
     if (!result || typeof result !== "object") return;
     const modelUrl = typeof result.modelUrl === "string" ? result.modelUrl : "";
     if (!/^https:\/\/assets\.meshy\.ai\//i.test(modelUrl)) return;
-    send({
-      status: {
-        id,
-        modelUrl,
-        previewUrl: typeof result.previewUrl === "string" ? result.previewUrl : "",
-        at: Date.now(),
-      },
-    });
+    const status = {
+      id,
+      modelUrl,
+      previewUrl: typeof result.previewUrl === "string" ? result.previewUrl : "",
+      at: Date.now(),
+    };
+    statusById.set(id, status);
+    send({ status });
   }
 
   function fromList(body) {
@@ -42,15 +70,65 @@
     const slim = [];
     for (const task of tasks) {
       if (typeof task?.id !== "string" || !task.id) continue;
+      // The list nests finished results by phase. A texture task can carry
+      // both the base auto-UV mesh and the textured mesh, so follow the task's
+      // phase first; otherwise the batch would export the untextured mesh.
+      const phase = String(task.phase || "").toLowerCase();
+      const phaseUrl = {
+        "auto-uv": task.result?.autoUv?.modelUrl,
+        autouv: task.result?.autoUv?.modelUrl,
+        texture: task.result?.texture?.modelUrl,
+        "image-to-3d-texture": task.result?.texture?.modelUrl,
+        stylize: task.result?.stylize?.modelUrl,
+        generate: task.result?.generate?.modelUrl,
+        draft: task.result?.generate?.modelUrl || task.result?.draft?.modelUrl,
+        upload: task.result?.generate?.modelUrl || task.result?.autoUv?.modelUrl,
+        face: task.result?.face?.modelUrl,
+        "model-edit": task.result?.modelEdit?.modelUrl,
+        modeledited: task.result?.modelEdit?.modelUrl,
+        "part-segmentation": task.result?.partSegmentation?.modelUrl,
+        relief: task.result?.relief?.modelUrl,
+        animate: task.result?.animate?.actions?.[0]?.animationGlbUrl,
+      }[phase];
+      const modelUrl = [
+        phaseUrl,
+        task.result?.autoUv?.modelUrl,
+        task.result?.texture?.modelUrl,
+        task.result?.stylize?.modelUrl,
+        task.result?.generate?.modelUrl,
+        task.result?.face?.modelUrl,
+        task.result?.modelEdit?.modelUrl,
+        task.result?.partSegmentation?.modelUrl,
+        task.result?.relief?.modelUrl,
+        task.result?.animate?.actions?.[0]?.animationGlbUrl,
+        task.result?.modelUrl,
+        task.modelUrl,
+        task.result?.modelUrls?.glb,
+        task.result?.model_urls?.glb,
+        task.modelUrls?.glb,
+        task.model_urls?.glb,
+      ].find((value) => typeof value === "string" && /^https:\/\/assets\.meshy\.ai\//i.test(value)) || "";
+      const createdAt = task.createdAt ?? task.created_at ?? 0;
       slim.push({
         id: task.id,
         name: typeof task.name === "string" ? task.name : "",
-        previewUrl: typeof task.result?.previewUrl === "string" ? task.result.previewUrl : "",
-        triangleCount: Number(task.triangleCount) || 0,
-        vertexCount: Number(task.vertexCount) || 0,
+        status: typeof task.status === "string" ? task.status : "",
+        phase: typeof task.phase === "string" ? task.phase : "",
+        previewUrl: [
+          task.result?.previewUrl,
+          task.previewUrl,
+          task.result?.thumbnailUrl,
+          task.thumbnailUrl,
+        ].find((value) => typeof value === "string" && value) || "",
+        triangleCount: Number(task.triangleCount ?? task.faceCount ?? task.face_count) || 0,
+        vertexCount: Number(task.vertexCount ?? task.vertex_count) || 0,
+        createdAt: typeof createdAt === "number" ? createdAt : Date.parse(createdAt) || 0,
+        modelUrl,
       });
     }
-    if (slim.length) send({ list: slim });
+    if (!slim.length) return;
+    rememberList(slim);
+    send({ list: listSnapshot() });
   }
 
   async function watchStatus(url, request) {
@@ -73,6 +151,14 @@
       // Same as above.
     }
   }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (data?.source !== "meshport" || data.type !== "meshy-sync") return;
+    if (taskList.size) send({ list: listSnapshot() });
+    for (const status of statusById.values()) send({ status });
+  });
 
   const originalFetch = window.fetch;
   window.fetch = function (...args) {

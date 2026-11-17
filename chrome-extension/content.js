@@ -318,6 +318,7 @@ function meshyDeviceId() {
 // Answers the workspace already received, relayed by meshy-world.js.
 const meshyStatusByTask = new Map();
 let meshyTaskList = [];
+let meshyLibraryAt = 0;
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
@@ -326,10 +327,24 @@ window.addEventListener("message", (event) => {
   if (data.status?.id && data.status.modelUrl) {
     meshyStatusByTask.set(data.status.id, data.status);
   }
+  if (Array.isArray(data.statuses)) {
+    for (const status of data.statuses) {
+      if (status?.id && status.modelUrl) meshyStatusByTask.set(status.id, status);
+    }
+  }
   if (Array.isArray(data.list) && data.list.length) {
-    meshyTaskList = data.list;
+    const merged = new Map(meshyTaskList.map((task) => [task.id, task]));
+    for (const task of data.list) {
+      if (!task?.id) continue;
+      merged.set(task.id, mergeMeshyTask(merged.get(task.id), task));
+    }
+    meshyTaskList = [...merged.values()];
   }
 });
+
+// The page may have loaded its list before this script started listening.
+// Ask meshy-world.js for the answers it kept.
+window.postMessage({ source: "meshport", type: "meshy-sync" }, "*");
 
 function meshyOpenTaskId() {
   // Calls that mean "this model is open": PUT .../open, GET .../status, and
@@ -352,7 +367,7 @@ function meshyOpenTaskId() {
   return strong?.id || weak?.id || "";
 }
 
-async function meshyJson(path, step) {
+async function meshyJson(path, step, { method = "GET" } = {}) {
   const deviceId = meshyDeviceId();
   if (!deviceId) {
     throw new Error("Meshport could not read the Meshy session. Reload the Meshy tab, then rescan.");
@@ -361,6 +376,7 @@ async function meshyJson(path, step) {
   try {
     response = await fetch(`https://${location.host}/meshyd-api/web${path}`, {
       credentials: "include",
+      method,
       headers: { "X-Device-Id": deviceId },
     });
   } catch {
@@ -387,62 +403,373 @@ async function meshyJson(path, step) {
   return payload.result;
 }
 
+// The list answer stays close to what the workspace rendered: one task per
+// library card, with the render and the triangle count. The signed GLB is
+// handed out per task, so it is resolved when the user exports.
+function meshyAssetUrl(value) {
+  return typeof value === "string" && /^https:\/\/assets\.meshy\.ai\//i.test(value)
+    ? value
+    : "";
+}
+
+function meshyTaskUrl(task) {
+  // The library answer keeps each finished result under the phase that made
+  // it. The workspace reads the same paths, so a model needs no extra status
+  // call when its link is already here.
+  const phase = String(task?.phase || "").toLowerCase();
+  const byPhase = {
+    "auto-uv": task?.result?.autoUv?.modelUrl,
+    texture: task?.result?.texture?.modelUrl,
+    "image-to-3d-texture": task?.result?.texture?.modelUrl,
+    stylize: task?.result?.stylize?.modelUrl,
+    generate: task?.result?.generate?.modelUrl,
+    draft: task?.result?.generate?.modelUrl || task?.result?.draft?.modelUrl,
+    upload: task?.result?.generate?.modelUrl || task?.result?.autoUv?.modelUrl,
+    "model-edit": task?.result?.modelEdit?.modelUrl,
+    "part-segmentation": task?.result?.partSegmentation?.modelUrl,
+    relief: task?.result?.relief?.modelUrl,
+    animate: task?.result?.animate?.actions?.[0]?.animationGlbUrl,
+  };
+  const candidates = [
+    byPhase[phase],
+    task?.result?.autoUv?.modelUrl,
+    task?.result?.texture?.modelUrl,
+    task?.result?.stylize?.modelUrl,
+    task?.result?.generate?.modelUrl,
+    task?.result?.face?.modelUrl,
+    task?.result?.modelEdit?.modelUrl,
+    task?.result?.partSegmentation?.modelUrl,
+    task?.result?.relief?.modelUrl,
+    task?.result?.animate?.actions?.[0]?.animationGlbUrl,
+    task?.result?.modelUrl,
+    task?.modelUrl,
+    task?.result?.modelUrls?.glb,
+    task?.result?.model_urls?.glb,
+    task?.modelUrls?.glb,
+    task?.model_urls?.glb,
+  ];
+  for (const value of candidates) {
+    const url = meshyAssetUrl(value);
+    if (url) return url;
+  }
+  return "";
+}
+
+function meshyTaskPreview(task) {
+  const candidates = [
+    task?.result?.previewUrl,
+    task?.previewUrl,
+    task?.result?.thumbnailUrl,
+    task?.thumbnailUrl,
+    task?.result?.thumbnail_url,
+    task?.thumbnail_url,
+    task?.result?.imageUrl,
+    task?.imageUrl,
+  ];
+  return candidates.find((value) => typeof value === "string" && value) || "";
+}
+
+// The workspace list and the extension's direct list can describe the same
+// task. The direct call runs without Meshy's bearer token, so its answer may
+// omit the signed links the page already received. Merge field by field and
+// keep whichever side still has a usable URL.
+function mergeMeshyTask(captured, fetched) {
+  if (!captured) return fetched;
+  if (!fetched) return captured;
+  const merged = { ...captured, ...fetched };
+  for (const key of ["name", "status", "phase", "previewUrl", "modelUrl",
+    "triangleCount", "vertexCount", "createdAt"]) {
+    if ((merged[key] === "" || merged[key] == null || merged[key] === 0) && captured[key]) {
+      merged[key] = captured[key];
+    }
+  }
+  if (!meshyTaskUrl(fetched) && meshyTaskUrl(captured)) {
+    merged.modelUrl = meshyTaskUrl(captured);
+  }
+  if (!meshyTaskPreview(fetched) && meshyTaskPreview(captured)) {
+    merged.previewUrl = meshyTaskPreview(captured);
+  }
+  if ((!fetched.result || !Object.keys(fetched.result).length) && captured.result) {
+    merged.result = captured.result;
+  }
+  return merged;
+}
+
+function meshyTaskCreatedAt(task) {
+  const value = task?.createdAt ?? task?.created_at ?? task?.createdTime ?? "";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 && value < 1e12 ? value * 1000 : value;
+  }
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function meshyTaskCounts(task) {
+  return {
+    triangles: Number(
+      task?.triangleCount
+        ?? task?.triangle_count
+        ?? task?.faceCount
+        ?? task?.face_count
+        ?? task?.result?.triangleCount
+        ?? task?.result?.faceCount
+        ?? task?.result?.generate?.faceCount,
+    ) || 0,
+    vertices: Number(
+      task?.vertexCount
+        ?? task?.vertex_count
+        ?? task?.result?.vertexCount
+        ?? task?.result?.generate?.vertexCount,
+    ) || 0,
+  };
+}
+
+function meshyTaskStatus(task) {
+  return String(task?.status ?? task?.result?.status ?? "").toUpperCase();
+}
+
+function meshyTaskModel(task) {
+  const id = typeof task?.id === "string" ? task.id : "";
+  if (!id) return null;
+  const status = meshyTaskStatus(task);
+  // A task without a finished GLB is not a library model yet. Leaving it out
+  // keeps the popup from offering an export that cannot succeed.
+  if (status && status !== "SUCCEEDED") return null;
+  const cached = meshyStatusByTask.get(id);
+  return {
+    kind: "meshy",
+    projectId: id,
+    url: meshyTaskUrl(task) || cached?.modelUrl || "",
+    name: typeof task?.name === "string" ? task.name : "",
+    createdAt: meshyTaskCreatedAt(task),
+    previewUrl: meshyTaskPreview(task) || cached?.previewUrl || "",
+    textures: [],
+    counts: meshyTaskCounts(task),
+  };
+}
+
+function meshyStatusResult(answer) {
+  const outer = answer?.result;
+  const inner = outer && typeof outer === "object" ? outer : answer;
+  if (inner?.result && typeof inner.result === "object") return inner.result;
+  return inner && typeof inner === "object" ? inner : {};
+}
+
+async function meshyOpenTask(taskId) {
+  await meshyJson(`/v2/tasks/${taskId}/open`, "open the model", { method: "PUT" })
+    .catch(() => {});
+}
+
+async function meshyReadTask(taskId) {
+  try {
+    return await meshyJson(`/v1/tasks/${taskId}/status`, "read the model");
+  } catch (error) {
+    // The workspace opens a model before reading its status. Retry that way
+    // when a direct status call refuses a task the page has not opened.
+    await meshyOpenTask(taskId);
+    try {
+      return await meshyJson(`/v1/tasks/${taskId}/status`, "read the model");
+    } catch {
+      throw error;
+    }
+  }
+}
+
+// Resolves one task's signed GLB link. The library answer usually carries it
+// already; the status endpoint is a fallback because it needs the workspace's
+// bearer token, which the extension deliberately does not read.
+async function meshyResolveTask(taskId, { fresh = false } = {}) {
+  const cached = meshyStatusByTask.get(taskId);
+  if (!fresh && cached?.modelUrl) return cached;
+
+  const fromList = async () => {
+    const listed = meshyTaskList.find((item) => item?.id === taskId);
+    const url = listed ? meshyTaskUrl(listed) : "";
+    if (!url) return null;
+    const resolved = {
+      id: taskId,
+      modelUrl: url,
+      previewUrl: meshyTaskPreview(listed),
+      at: Date.now(),
+    };
+    meshyStatusByTask.set(taskId, resolved);
+    return resolved;
+  };
+
+  if (!fresh) {
+    const listed = await fromList();
+    if (listed) return listed;
+    // A list captured before the page had the link is useless. Re-read the
+    // library once so a Retry works without forcing a rescan, but throttle it
+    // so a batch of linkless models does not hammer the workspace.
+    if (Date.now() - meshyLibraryAt > 15000) {
+      try {
+        await meshyLibrary();
+        const refreshed = await fromList();
+        if (refreshed) return refreshed;
+      } catch {
+        // Fall through to the status call.
+      }
+    }
+  } else {
+    // An expired link needs a fresh signature. Ask the library first, since
+    // that is the same answer the workspace uses without a token.
+    try {
+      await meshyLibrary();
+      const listed = await fromList();
+      if (listed && listed.modelUrl !== cached?.modelUrl) return listed;
+    } catch {
+      // Fall through to the status call.
+    }
+  }
+
+  let answer;
+  try {
+    answer = await meshyReadTask(taskId);
+  } catch (error) {
+    if (/HTTP 401/.test(error.message)) {
+      throw new Error(
+        "Meshy did not include a download link for this model. Open it once in the Meshy workspace, then rescan.",
+      );
+    }
+    throw error;
+  }
+  let info = meshyStatusResult(answer);
+  let modelUrl = meshyAssetUrl(info.modelUrl);
+
+  if (!modelUrl) {
+    // The status can answer without a link until the task is marked open.
+    await meshyOpenTask(taskId);
+    answer = await meshyJson(`/v1/tasks/${taskId}/status`, "read the model");
+    info = meshyStatusResult(answer);
+    modelUrl = meshyAssetUrl(info.modelUrl);
+  }
+
+  if (!modelUrl) throw new Error("Meshy has no GLB ready for this model yet.");
+  const resolved = {
+    id: taskId,
+    modelUrl,
+    previewUrl: typeof info.previewUrl === "string" ? info.previewUrl : "",
+    at: Date.now(),
+  };
+  meshyStatusByTask.set(taskId, resolved);
+  return resolved;
+}
+
+async function meshyLibrary() {
+  if (!meshyDeviceId()) {
+    throw new Error("Meshport could not read the Meshy session. Reload the Meshy tab, then rescan.");
+  }
+  // The page list is the only source the extension has for signed links
+  // without the workspace bearer token. Give a replay a moment to arrive when
+  // this scan started before meshy-world.js had anything to hand over.
+  if (!meshyTaskList.length) {
+    window.postMessage({ source: "meshport", type: "meshy-sync" }, "*");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  // Stamp the attempt, not only the success, so a failing library call cannot
+  // be retried on every queued model.
+  meshyLibraryAt = Date.now();
+  let fetched = [];
+  let captured = false;
+  try {
+    // Pages hold 50 tasks each; stop at the first partial page. The cap keeps
+    // a huge library from turning one scan into a long request chain.
+    for (let page = 1; page <= 10; page += 1) {
+      const query = MESHY_TASKS_QUERY.replace("pageNum=1", `pageNum=${page}`);
+      const batch = await meshyJson(`/v2/tasks${query}`, "read the library");
+      if (!Array.isArray(batch) || !batch.length) break;
+      fetched.push(...batch);
+      if (batch.length < 50) break;
+    }
+  } catch (error) {
+    if (!meshyTaskList.length) throw error;
+    captured = true;
+  }
+
+  // The sidebar may already have loaded a list with different filters, so
+  // union both sources. The direct fetch wins on metadata, but never on a
+  // signed link only the page answer carries.
+  const merged = new Map();
+  for (const task of meshyTaskList) {
+    if (task?.id) merged.set(task.id, task);
+  }
+  for (const task of fetched) {
+    if (!task?.id) continue;
+    merged.set(task.id, mergeMeshyTask(merged.get(task.id), task));
+  }
+  const tasks = [...merged.values()];
+  meshyTaskList = tasks;
+
+  const models = [];
+  const seen = new Set();
+  for (const task of tasks) {
+    const model = meshyTaskModel(task);
+    if (!model || seen.has(model.projectId)) continue;
+    seen.add(model.projectId);
+    models.push(model);
+  }
+  // A status answer the page already captured can describe a model the list
+  // call missed. Keep it instead of dropping a model the user just opened.
+  for (const [id, info] of meshyStatusByTask) {
+    if (seen.has(id) || !info?.modelUrl) continue;
+    const task = tasks.find((item) => item?.id === id) || { id, status: "SUCCEEDED" };
+    const model = meshyTaskModel(task);
+    if (!model) continue;
+    seen.add(id);
+    models.push(model);
+  }
+
+  models.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  meshyLibraryAt = Date.now();
+  return { ok: true, models, captured };
+}
+
 async function meshyModel() {
   const taskId = meshyOpenTaskId();
   if (!taskId) {
     return { ok: false, error: "Open a model in your Meshy workspace, then rescan." };
   }
-
-  // Primary source: the answer the workspace itself received when you
-  // opened the model, captured from inside the page.
-  let info = meshyStatusByTask.get(taskId) || null;
-
-  if (!info?.modelUrl) {
-    // Fallback: ask the API directly, the way the workspace does.
-    const [statusSettled, listSettled] = await Promise.allSettled([
-      meshyJson(`/v1/tasks/${taskId}/status`, "read the model"),
-      meshyJson(`/v2/tasks${MESHY_TASKS_QUERY}`, "read the library"),
-    ]);
-    if (statusSettled.status === "rejected") {
-      return { ok: false, error: statusSettled.reason.message };
-    }
-    if (listSettled.status === "fulfilled" && Array.isArray(listSettled.value)) {
-      meshyTaskList = listSettled.value;
-    }
-    // meshyJson unwraps the API envelope, and the status answer wraps the
-    // model info one level deeper: {status, result: {modelUrl}}.
-    const answer = statusSettled.value || {};
-    info = answer.result && typeof answer.result === "object" ? answer.result : answer;
+  let info;
+  try {
+    info = await meshyResolveTask(taskId);
+  } catch (error) {
+    return { ok: false, error: error.message };
   }
-
-  const modelUrl = typeof info.modelUrl === "string" ? info.modelUrl : "";
-  if (!modelUrl || !/^https:\/\/assets\.meshy\.ai\//i.test(modelUrl)) {
+  const task = meshyTaskList.find((item) => item.id === taskId)
+    || { id: taskId, status: "SUCCEEDED" };
+  const model = meshyTaskModel(task);
+  if (!model) {
     return { ok: false, error: "Meshy has no GLB ready for this model yet." };
   }
-
-  const task = meshyTaskList.find((item) => item.id === taskId) || null;
-
   return {
     ok: true,
     model: {
-      kind: "meshy",
-      projectId: taskId,
-      url: modelUrl,
-      name: task?.name || "",
-      previewUrl: typeof info.previewUrl === "string" && info.previewUrl
-        ? info.previewUrl
-        : task?.previewUrl || "",
-      textures: [],
-      counts: {
-        triangles: Number(task?.triangleCount) || 0,
-        vertices: Number(task?.vertexCount) || 0,
-      },
+      ...model,
+      url: info.modelUrl,
+      previewUrl: info.previewUrl || model.previewUrl,
     },
   };
 }
 
 if (MESHY_HOST) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "get-meshy-library") {
+      meshyLibrary()
+        .then((response) => sendResponse(response))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+    if (message?.type === "get-meshy-url" && typeof message.taskId === "string") {
+      meshyResolveTask(message.taskId, { fresh: Boolean(message.fresh) })
+        .then((info) => sendResponse({
+          ok: true,
+          url: info.modelUrl,
+          previewUrl: info.previewUrl,
+        }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
     if (message?.type !== "get-meshy-model") return;
     meshyModel()
       .then((response) => sendResponse(response))

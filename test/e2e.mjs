@@ -1,9 +1,10 @@
 // Drives a real browser through both platforms: the Tripo library, the
-// Meshy scan, the platform round trip, and a full Meshy download from the
-// converter sandbox to a saved file.
+// Meshy library scan, the platform round trip, a Meshy batch of models that
+// were never opened, and a queued batch of Tripo models with search,
+// selection, sorting and persisted queue state.
 import puppeteer from "puppeteer-core";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,9 @@ const EXT = fileURLToPath(new URL("../chrome-extension/", import.meta.url));
 const FIXTURE_GLB = readFileSync(new URL("../test/fixtures/cube-meshopt.glb", import.meta.url));
 const EDGE = process.env.MESHPORT_EDGE_PATH
   || "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+// Optional visual audit: MESHPORT_SHOTS=<folder> saves one full-page capture
+// per UI state the test reaches.
+const SHOT_DIR = process.env.MESHPORT_SHOTS || "";
 const IMAGE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -23,7 +27,7 @@ const MODELS = [
 ];
 
 const server = createServer((request, response) => {
-  if (request.url?.match(/^\/(cover\/[\w-]+|meshy-preview)\.png$/)) {
+  if (request.url?.match(/^\/(cover\/[\w-]+|meshy-preview[\w-]*)\.png$/)) {
     response.writeHead(200, {
       "content-type": "image/png",
       "cache-control": "no-store",
@@ -71,23 +75,18 @@ function apiBody(url) {
   return { code: 404, message: "Unknown endpoint" };
 }
 
-// A fake Meshy workspace. The page fetches the same two endpoints the real
-// app hits when you open a model, which is how the extension's content
-// script learns which task is open.
+// A fake Meshy workspace with two finished models. The list carries each
+// signed link under the phase that produced it, exactly like the real answer:
+// one under result.autoUv and one under result.texture. The status endpoint
+// answers 401 because it needs the workspace bearer token, which the extension
+// must not need for models whose link is already in the library answer.
 const MESHY_TASK_ID = "01a1e2b0-1463-7714-9a83-ffb4421ba372";
+const MESHY_TASK_2_ID = "02b2e2b0-1463-7714-9a83-ffb4421ba998";
+const MESHY_TASK_3_ID = "03c3e2b0-1463-7714-9a83-ffb4421ba771";
 const MESHY_GLB_URL = `https://assets.meshy.ai/3783bcf3/tasks/${MESHY_TASK_ID}/output/model.glb?Expires=1893456789&Signature=e2e`;
+const MESHY_GLB_2_URL = `https://assets.meshy.ai/3783bcf3/tasks/${MESHY_TASK_2_ID}/output/model.glb?Expires=1893456789&Signature=e2e2`;
 const MESHY_PREVIEW_URL = `${coverBase}/meshy-preview.png`;
-// The real status answer wraps the model info twice; keep the mock honest
-// about that depth.
-const MESHY_STATUS_BODY = {
-  code: "OK",
-  requestId: "status",
-  result: {
-    status: "SUCCEEDED",
-    retryCount: 0,
-    result: { modelUrl: MESHY_GLB_URL, previewUrl: MESHY_PREVIEW_URL },
-  },
-};
+const MESHY_PREVIEW_2_URL = `${coverBase}/meshy-preview-2.png`;
 const MESHY_LIST_BODY = {
   code: "OK",
   requestId: "list",
@@ -96,21 +95,59 @@ const MESHY_LIST_BODY = {
       id: MESHY_TASK_ID,
       name: "Desolate Urban Road",
       status: "SUCCEEDED",
-      triangleCount: 123238,
+      phase: "auto-uv",
+      faceCount: 123238,
       vertexCount: 61619,
       createdAt: 1794804552997,
-      result: { previewUrl: MESHY_PREVIEW_URL },
+      result: {
+        previewUrl: MESHY_PREVIEW_URL,
+        autoUv: { modelUrl: MESHY_GLB_URL },
+      },
+    },
+    {
+      id: MESHY_TASK_2_ID,
+      name: "Rustbound Vent",
+      status: "SUCCEEDED",
+      phase: "texture",
+      faceCount: 15267,
+      vertexCount: 13840,
+      createdAt: 1794804551997,
+      result: {
+        previewUrl: MESHY_PREVIEW_2_URL,
+        texture: { modelUrl: MESHY_GLB_2_URL },
+      },
+    },
+    {
+      id: MESHY_TASK_3_ID,
+      name: "Unloaded Shard",
+      status: "SUCCEEDED",
+      phase: "generate",
+      faceCount: 8000,
+      vertexCount: 4000,
+      createdAt: 1794804550997,
+      // This task never appeared in an authenticated answer, so neither the
+      // page nor the direct list has a signed link for it.
+      result: {},
     },
   ],
+};
+// The extension's own /v2/tasks call carries no bearer token, so the real API
+// answers without the signed asset links. Only the workspace's authenticated
+// list does. The scan must keep the links from the captured page answer.
+const MESHY_LIST_BODY_NO_LINKS = {
+  ...MESHY_LIST_BODY,
+  result: MESHY_LIST_BODY.result.map(({ result, ...task }) => ({
+    ...task,
+    result: result?.previewUrl ? { previewUrl: result.previewUrl } : {},
+  })),
 };
 const MESHY_HTML = `<!doctype html><html><head><title>Meshy</title></head><body><h1>Workspace</h1><script>
 (async () => {
   const id = "${MESHY_TASK_ID}";
   const device = "e2e0f6c8-5d5d-4a11-9c1d-000000000001";
   localStorage.setItem("meshy_device_id", device);
-  const headers = { "X-Device-Id": device };
+  const headers = { "X-Device-Id": device, Authorization: "Bearer e2e-page" };
   try { await fetch("/meshyd-api/web/v2/tasks/" + id + "/open", { headers }); } catch {}
-  try { await fetch("/meshyd-api/web/v1/tasks/" + id + "/status", { headers }); } catch {}
   try { await fetch("/meshyd-api/web/v2/tasks?excludeWorkspace=true&pageNum=1&pageSize=50", { headers }); } catch {}
   window.__meshportMockReady = true;
 })();
@@ -190,6 +227,7 @@ await tripoPage.goto("https://studio.tripo3d.ai/workspace", { waitUntil: "load" 
 await new Promise((resolve) => setTimeout(resolve, 800));
 
 const meshyPage = await browser.newPage();
+let meshyDirectListCalls = 0;
 await meshyPage.setRequestInterception(true);
 meshyPage.on("request", (request) => {
   const url = request.url();
@@ -211,15 +249,32 @@ meshyPage.on("request", (request) => {
         });
         return;
       }
+      const statusMatch = parsed.pathname.match(/\/v1\/tasks\/([0-9a-f-]+)\/status$/);
       let body;
-      if (/\/v1\/tasks\/[0-9a-f-]+\/status$/.test(parsed.pathname)) body = MESHY_STATUS_BODY;
-      else if (/\/v2\/tasks\/[0-9a-f-]+\/open$/.test(parsed.pathname)) body = { code: "OK", requestId: "open", result: {} };
-      else if (parsed.pathname === "/meshyd-api/web/v2/tasks") body = MESHY_LIST_BODY;
-      else body = { code: "FAIL", message: "Unknown endpoint" };
+      if (statusMatch) {
+        // The real status endpoint needs the workspace bearer token. Meshport
+        // should never call it for a model whose link was in the list.
+        request.respond({
+          status: 401,
+          contentType: "application/json",
+          body: JSON.stringify({ code: "FAIL", message: "missing bearer token" }),
+        });
+        return;
+      }
+      if (/\/v2\/tasks\/[0-9a-f-]+\/open$/.test(parsed.pathname)) body = { code: "OK", requestId: "open", result: {} };
+      else if (parsed.pathname === "/meshyd-api/web/v2/tasks") {
+        const authorized = (request.headers()["authorization"] || "").trim();
+        if (authorized) {
+          body = MESHY_LIST_BODY;
+        } else {
+          meshyDirectListCalls += 1;
+          body = MESHY_LIST_BODY_NO_LINKS;
+        }
+      } else body = { code: "FAIL", message: "Unknown endpoint" };
       request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
       return;
     }
-    if (url === MESHY_GLB_URL) {
+    if (/^https:\/\/assets\.meshy\.ai\/.*\.glb(?:[?#]|$)/i.test(url)) {
       request.respond({ status: 200, contentType: "model/gltf-binary", body: FIXTURE_GLB });
       return;
     }
@@ -232,21 +287,31 @@ await meshyPage.goto("https://www.meshy.ai/pt-BR/workspace", { waitUntil: "load"
 await meshyPage.waitForFunction(() => window.__meshportMockReady === true, { timeout: 15000 });
 
 const page = await browser.newPage();
-// The popup downloads the model itself, so the fake Meshy GLB link has to
-// answer on this page too.
+// The popup downloads the models itself, so the fake Meshy and Tripo GLB
+// links have to answer on this page too.
+const TRIPO_GLB = /^https:\/\/tripo-data\.rg1\.data\.tripo3d\.com\/.*\.glb(?:[?#]|$)/i;
 await page.setRequestInterception(true);
 page.on("request", (request) => {
-  if (request.url() === MESHY_GLB_URL) {
+  if (/^https:\/\/assets\.meshy\.ai\/.*\.glb(?:[?#]|$)/i.test(request.url())) {
+    request.respond({ status: 200, contentType: "model/gltf-binary", body: FIXTURE_GLB });
+    return;
+  }
+  if (TRIPO_GLB.test(request.url())) {
     request.respond({ status: 200, contentType: "model/gltf-binary", body: FIXTURE_GLB });
     return;
   }
   request.continue();
 });
 page.on("pageerror", (error) => console.log("popup error:", error.message));
-await page.setViewport({ width: 380, height: 700, deviceScaleFactor: 2 });
+await page.setViewport({ width: 380, height: 600, deviceScaleFactor: 2 });
 await page.goto(`chrome-extension://${extensionId}/popup.html`, { waitUntil: "load" });
 
 const problems = [];
+const shot = async (name) => {
+  if (!SHOT_DIR) return;
+  mkdirSync(SHOT_DIR, { recursive: true });
+  await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), fullPage: true });
+};
 const waitCards = () =>
   page.waitForFunction(() => document.querySelectorAll(".model").length >= 2, { timeout: 30000 });
 const waitMeshyCard = () =>
@@ -269,31 +334,58 @@ let now = await state();
 console.log("tripo scan:", now);
 if (now.cards < 2) problems.push("tripo cards missing");
 if (now.platform !== "tripo" && now.platform !== null) problems.push(`platform ${now.platform}`);
+await shot("01-tripo-list");
+await page.evaluate(() => {
+  const main = document.querySelector("main");
+  const previous = main.style.scrollBehavior;
+  main.style.scrollBehavior = "auto";
+  main.scrollTop = main.scrollHeight;
+  main.style.scrollBehavior = previous;
+});
+await shot("01b-tripo-bottom");
+await page.evaluate(() => {
+  const main = document.querySelector("main");
+  const previous = main.style.scrollBehavior;
+  main.style.scrollBehavior = "auto";
+  main.scrollTop = 0;
+  main.style.scrollBehavior = previous;
+});
 
 // Picking a model must survive a platform round trip.
 await page.evaluate(() => document.querySelector(".model").click());
 const pickedName = await page.evaluate(() => document.getElementById("base-name").value);
 if (!pickedName) problems.push("picked model did not set the file name");
+await shot("02-tripo-selected");
 
-// Switching to Meshy scans the open model on its own: one card, real name,
-// triangle count in the meta line, and the theme melts to violet.
+// Switching to Meshy lists the whole library, not just the open model: two
+// cards with real names, triangle counts, and the theme melts to violet.
 await page.click("#platform-meshy");
 await new Promise((resolve) => setTimeout(resolve, 600)); // the theme melt takes 350ms
 await waitMeshyCard();
 now = await state();
 console.log("meshy scan:", now);
-if (now.cards !== 1) problems.push(`meshy cards ${now.cards}`);
-if (now.count !== "1") problems.push(`meshy count ${now.count}`);
-if (!now.status.includes("Desolate Urban Road is ready")) problems.push(`meshy status: ${now.status}`);
+if (now.cards !== 3) problems.push(`meshy cards ${now.cards}`);
+if (now.count !== "3") problems.push(`meshy count ${now.count}`);
+if (!now.status.includes("3 models in your Meshy library")) problems.push(`meshy status: ${now.status}`);
 if (now.platform !== "meshy") problems.push("platform not persisted");
-const cardText = await page.evaluate(() => document.querySelector(".model")?.textContent || "");
-if (!cardText.includes("Desolate Urban Road")) problems.push("meshy card name missing");
-if (!cardText.includes("Open in Meshy · 123.2k tris")) problems.push(`meshy meta: ${cardText}`);
+// This scan must have exercised the linkless direct list; the export below
+// only works if the captured page list kept its signed links.
+if (!meshyDirectListCalls) problems.push("meshy direct list was not exercised");
+const meshyCards = await page.evaluate(
+  () => [...document.querySelectorAll(".model")].map((item) => item.textContent),
+);
+const openCard = meshyCards.find((text) => text.includes("Desolate Urban Road")) || "";
+const libraryCard = meshyCards.find((text) => text.includes("Rustbound Vent")) || "";
+if (!openCard) problems.push("meshy open model card missing");
+if (!openCard.includes("Meshy · 123.2k tris")) problems.push(`meshy open meta: ${openCard}`);
+if (!libraryCard) problems.push("meshy library model card missing");
+if (!libraryCard.includes("Meshy · 15.3k tris")) problems.push(`meshy library meta: ${libraryCard}`);
 const meshyThumb = await page.waitForFunction(
   () => document.querySelector(".model .model-thumb img")?.src.startsWith("data:image/"),
   { timeout: 15000 },
 );
 if (!meshyThumb) problems.push("meshy preview thumbnail missing");
+await shot("03-meshy-list");
 if ((await page.evaluate(() => document.body.dataset.platform)) !== "meshy") {
   problems.push("body dataset not meshy");
 }
@@ -344,7 +436,7 @@ if (!pickedName || (await page.evaluate(() => document.getElementById("base-name
   problems.push("file name did not survive the round trip");
 }
 
-// Reload while on Meshy: the popup rescans the open model on its own, no
+// Reload while on Meshy: the popup rescans the whole library on its own, no
 // manual step needed.
 await page.click("#platform-meshy");
 await waitMeshyCard();
@@ -352,28 +444,104 @@ await page.reload({ waitUntil: "load" });
 await waitMeshyCard();
 now = await state();
 console.log("reload on meshy:", now);
-if (now.cards !== 1) problems.push("meshy card after reload");
+if (now.cards !== 3) problems.push("meshy cards after reload");
 if (now.platform !== "meshy") problems.push("platform lost after reload");
 if ((await page.evaluate(() => document.body.dataset.platform)) !== "meshy") {
   problems.push("body dataset lost after reload");
 }
 
-// Export the open Meshy model end to end. The GLB bytes ride to the
-// converter sandbox as a postMessage transfer, so only a real ArrayBuffer
-// survives the trip; a typed array dies right here.
-await page.evaluate(() => document.querySelector(".model").click());
+// Queue both Meshy models the workspace never opened. Their signed links are
+// only in the captured page answer; the extension's direct list comes back
+// without them, and the status endpoint answers 401. Multi-select must still
+// deliver both files without opening them one by one. The third model, which
+// no authenticated answer ever listed, has no link and must stay out of the
+// selection with a visible explanation. The GLB bytes ride to the converter
+// sandbox as a postMessage transfer, so only a real ArrayBuffer survives.
+const linklessCard = await page.evaluate(() => {
+  const row = [...document.querySelectorAll(".model-row")]
+    .find((item) => item.textContent.includes("Unloaded Shard"));
+  if (!row) return null;
+  return {
+    disabled: row.querySelector('input[type="checkbox"]')?.disabled,
+    meta: row.querySelector(".model-meta")?.textContent || "",
+    title: row.querySelector(".pick")?.title || "",
+    dashed: getComputedStyle(row.querySelector(".pick")).borderStyle,
+  };
+});
+console.log("meshy linkless card:", linklessCard);
+if (!linklessCard) problems.push("meshy linkless card missing");
+if (linklessCard?.disabled !== true) problems.push("meshy linkless checkbox is enabled");
+if (!linklessCard?.meta.includes("Open once in Meshy")) {
+  problems.push(`meshy linkless meta: ${linklessCard?.meta}`);
+}
+if (!linklessCard?.title.includes("Open this model once in Meshy")) {
+  problems.push(`meshy linkless title: ${linklessCard?.title}`);
+}
+if (linklessCard?.dashed !== "dashed") problems.push(`meshy linkless style: ${linklessCard?.dashed}`);
+
+// Ticking every box selects only the two with links; the disabled box ignores
+// the click. Then clear and use Select all, which must skip the linkless card
+// too and leave the same two models selected.
+const readSelection = () => page.evaluate(() => ({
+  label: document.getElementById("select-count").textContent,
+  button: document.getElementById("export-selected").textContent,
+  disabled: document.getElementById("export-selected").disabled,
+}));
+const checkSelection = (selection, source) => {
+  console.log(`meshy selection (${source}):`, selection);
+  if (!selection.label.includes("2 selected")) {
+    problems.push(`meshy selection label (${source}): ${selection.label}`);
+  }
+  if (selection.button !== "Export 2") {
+    problems.push(`meshy selection button (${source}): ${selection.button}`);
+  }
+  if (selection.disabled) problems.push(`meshy export button disabled (${source})`);
+};
+await page.evaluate(() => {
+  document.querySelectorAll('.model-row input[type="checkbox"]').forEach((box) => {
+    if (!box.disabled && !box.checked) box.click();
+  });
+});
+checkSelection(await readSelection(), "tick boxes");
+await page.click("#select-clear");
+await page.click("#select-all");
+checkSelection(await readSelection(), "select all");
 await page.evaluate(() => {
   document.querySelector('input[name="format"][value="stl"]').closest("label").click();
 });
-await page.click("#convert");
-let exported = "";
-for (let i = 0; i < 60; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  exported = (await state()).status;
-  if (exported.includes("saved") || /^Error:/.test(exported)) break;
+await page.click("#export-selected");
+const queuedMessage = await page.evaluate(() => document.getElementById("status").textContent);
+if (!queuedMessage.includes("Queued 2 models as STL")) {
+  problems.push(`meshy queued message: ${queuedMessage}`);
 }
-console.log("meshy export:", exported);
-if (!exported.includes("saved")) problems.push(`meshy export did not save: ${exported}`);
+await page.waitForFunction(() => {
+  const items = [...document.querySelectorAll("#queue-list .queue-item")];
+  return items.length === 2 && items.every((item) => item.dataset.status === "completed");
+}, { timeout: 60000 });
+const meshyBatch = await page.evaluate(() => ({
+  summary: document.getElementById("queue-summary-line").textContent,
+  names: [...document.querySelectorAll(".queue-name")].map((element) => element.textContent),
+  details: [...document.querySelectorAll(".queue-detail")].map((element) => element.textContent),
+}));
+console.log("meshy batch:", meshyBatch);
+if (!meshyBatch.summary.includes("2 done")) problems.push(`meshy batch summary: ${meshyBatch.summary}`);
+if (meshyBatch.names.length !== 2) problems.push(`meshy batch size: ${meshyBatch.names}`);
+if (meshyBatch.names.includes("Unloaded Shard")) problems.push(`meshy linkless model entered queue: ${meshyBatch.names}`);
+if (!meshyBatch.names.includes("Rustbound Vent")) problems.push(`meshy batch names: ${meshyBatch.names}`);
+if (!meshyBatch.names.includes("Desolate Urban Road")) problems.push(`meshy batch names: ${meshyBatch.names}`);
+if (!meshyBatch.details.some((detail) => /Rustbound[_ ]Vent\.stl saved\./.test(detail))) {
+  problems.push(`meshy batch detail: ${meshyBatch.details}`);
+}
+if (!meshyBatch.details.some((detail) => /Desolate[_ ]Urban[_ ]Road\.stl saved\./.test(detail))) {
+  problems.push(`meshy batch detail: ${meshyBatch.details}`);
+}
+await shot("03b-meshy-batch");
+await page.click("#queue-clear");
+await page.waitForFunction(
+  () => document.querySelectorAll("#queue-list .queue-item").length === 0,
+  { timeout: 5000 },
+);
+await page.click("#view-queue-toggle");
 
 // And Tripo needs one manual rescan to come back.
 await page.click("#platform-tripo");
@@ -382,21 +550,266 @@ await waitCards();
 now = await state();
 if (now.cards < 2) problems.push("manual rescan on tripo did not restore cards");
 
+// Search and selection share one list. A hidden but selected model must not
+// inflate the Export button or sneak into the batch.
+const setSearch = (value) => page.evaluate((query) => {
+  const input = document.getElementById("search");
+  input.value = query;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}, value);
+const firstName = () => page.evaluate(() => document.querySelector(".model-name")?.textContent || "");
+
+const toolsVisible = await page.evaluate(() => ({
+  tools: !document.getElementById("library-tools").hidden,
+  bar: !document.getElementById("select-bar").hidden,
+}));
+if (!toolsVisible.tools) problems.push("search tools hidden with a library loaded");
+if (!toolsVisible.bar) problems.push("selection bar hidden with a library loaded");
+const tripoWidth = await page.evaluate(() => ({
+  scroll: document.documentElement.scrollWidth,
+  body: document.body.clientWidth,
+}));
+if (tripoWidth.scroll > tripoWidth.body) {
+  problems.push(`popup overflows horizontally on Tripo: ${tripoWidth.scroll}/${tripoWidth.body}`);
+}
+
+await setSearch("avocado");
+await page.waitForFunction(
+  () => document.querySelectorAll(".model").length === 1
+    && document.querySelector(".model-name")?.textContent === "Avocado",
+  { timeout: 5000 },
+);
+let selectionState = await page.evaluate(() => ({
+  count: document.getElementById("model-count").textContent,
+  label: document.getElementById("select-count").textContent,
+}));
+if (selectionState.count !== "1/2") problems.push(`filtered count ${selectionState.count}`);
+
+await page.evaluate(() => document.querySelector('.model-row input[type="checkbox"]').click());
+selectionState = await page.evaluate(() => ({
+  label: document.getElementById("select-count").textContent,
+  button: document.getElementById("export-selected").textContent,
+}));
+if (selectionState.label !== "1 selected") problems.push(`selection label ${selectionState.label}`);
+if (selectionState.button !== "Export 1") problems.push(`selection button ${selectionState.button}`);
+await shot("04-search-selected");
+
+await setSearch("street");
+await page.waitForFunction(
+  () => document.querySelectorAll(".model").length === 1
+    && document.querySelector(".model-name")?.textContent === "Street Van",
+  { timeout: 5000 },
+);
+selectionState = await page.evaluate(() => ({
+  label: document.getElementById("select-count").textContent,
+  disabled: document.getElementById("export-selected").disabled,
+  button: document.getElementById("export-selected").textContent,
+}));
+if (selectionState.label !== "1 selected, 0 shown") problems.push(`hidden selection label ${selectionState.label}`);
+if (!selectionState.disabled) problems.push("export enabled with only hidden models selected");
+if (selectionState.button !== "Export") problems.push(`hidden selection button ${selectionState.button}`);
+await shot("05-hidden-selection");
+
+await page.click("#search-clear");
+await page.waitForFunction(() => document.querySelectorAll(".model").length === 2, { timeout: 5000 });
+await page.evaluate(() => {
+  const row = [...document.querySelectorAll(".model-row")]
+    .find((item) => item.querySelector(".model-name")?.textContent === "Street Van");
+  row.querySelector('input[type="checkbox"]').click();
+});
+selectionState = await page.evaluate(() => ({
+  label: document.getElementById("select-count").textContent,
+  button: document.getElementById("export-selected").textContent,
+}));
+if (selectionState.label !== "2 selected") problems.push(`two-model label ${selectionState.label}`);
+if (selectionState.button !== "Export 2") problems.push(`two-model button ${selectionState.button}`);
+
+// Sorting must not disturb the selection.
+await page.click("#sort-name");
+await page.waitForFunction(
+  () => document.querySelector(".model-name")?.textContent === "Avocado",
+  { timeout: 5000 },
+);
+selectionState = await page.evaluate(() => ({
+  label: document.getElementById("select-count").textContent,
+  pressed: document.getElementById("sort-name").getAttribute("aria-pressed"),
+}));
+if (selectionState.label !== "2 selected") problems.push("selection lost after name sort");
+if (selectionState.pressed !== "true") problems.push("name sort not pressed");
+await page.click("#sort-date");
+await page.waitForFunction(
+  () => document.querySelector(".model-name")?.textContent === "Street Van",
+  { timeout: 5000 },
+);
+
+// Queue both models as STL and watch the queue finish each item.
+await page.click("#export-selected");
+await page.waitForFunction(
+  () => !document.getElementById("view-queue").hidden,
+  { timeout: 5000 },
+);
+await page.waitForFunction(() => {
+  const items = [...document.querySelectorAll("#queue-list .queue-item")];
+  return items.length === 2 && items.every((item) => item.dataset.status === "completed");
+}, { timeout: 120000 });
+const queueState = await page.evaluate(() => ({
+  count: document.getElementById("queue-count").textContent,
+  summary: document.getElementById("queue-summary-line").textContent,
+  names: [...document.querySelectorAll(".queue-name")].map((element) => element.textContent),
+  statuses: [...document.querySelectorAll(".queue-status")].map((element) => element.textContent),
+  details: [...document.querySelectorAll(".queue-detail")].map((element) => element.textContent),
+  badgeHidden: document.getElementById("queue-badge").hidden,
+  exportHidden: document.getElementById("view-export").hidden,
+}));
+console.log("batch queue:", queueState);
+if (queueState.count !== "2") problems.push(`queue count ${queueState.count}`);
+if (!queueState.summary.includes("2 done")) problems.push(`queue summary ${queueState.summary}`);
+if (queueState.names.join("|") !== "Street Van|Avocado") problems.push(`queue order ${queueState.names}`);
+if (!queueState.statuses.every((status) => status === "Done")) problems.push(`queue statuses ${queueState.statuses}`);
+if (!queueState.details.some((detail) => /Street[_ ]Van\.stl saved\./.test(detail))) {
+  problems.push(`street detail ${queueState.details}`);
+}
+if (!queueState.details.some((detail) => detail.includes("Avocado.stl saved."))) {
+  problems.push(`avocado detail ${queueState.details}`);
+}
+if (!queueState.badgeHidden) problems.push("queue badge still shows finished work");
+if (!queueState.exportHidden) problems.push("export view still visible behind the queue");
+const queueWidth = await page.evaluate(() => ({
+  scroll: document.documentElement.scrollWidth,
+  body: document.body.clientWidth,
+}));
+if (queueWidth.scroll > queueWidth.body) {
+  problems.push(`popup overflows horizontally in the queue: ${queueWidth.scroll}/${queueWidth.body}`);
+}
+await shot("06-queue-done");
+
+await page.click("#view-queue-toggle");
+await page.waitForFunction(() => !document.getElementById("view-export").hidden, { timeout: 5000 });
+selectionState = await page.evaluate(() => ({
+  picked: document.querySelectorAll(".model-row.picked").length,
+  label: document.getElementById("select-count").textContent,
+  button: document.getElementById("export-selected").textContent,
+}));
+if (selectionState.picked !== 2) problems.push(`picked rows after queue ${selectionState.picked}`);
+if (selectionState.label !== "2 selected") problems.push(`selection after queue ${selectionState.label}`);
+if (selectionState.button !== "Export 2") problems.push(`export button after queue ${selectionState.button}`);
+
+// The queue lives in chrome.storage.session, so a popup reload keeps the
+// finished batch instead of pretending it never happened.
+await page.reload({ waitUntil: "load" });
+await waitCards();
+await page.waitForFunction(
+  () => document.querySelectorAll("#queue-list .queue-item[data-status='completed']").length === 2,
+  { timeout: 15000 },
+);
+await page.click("#view-queue-toggle");
+const restoredSummary = await page.evaluate(
+  () => document.getElementById("queue-summary-line").textContent,
+);
+if (!restoredSummary.includes("2 done")) problems.push(`queue lost after reload: ${restoredSummary}`);
+
+await page.click("#queue-clear");
+await page.waitForFunction(() => document.querySelectorAll("#queue-list .queue-item").length === 0, { timeout: 5000 });
+const clearedState = await page.evaluate(() => ({
+  summary: document.getElementById("queue-summary-line").textContent,
+  summaryHidden: document.getElementById("queue-summary-line").hidden,
+  emptyHidden: document.getElementById("queue-empty").hidden,
+  clearHidden: document.getElementById("queue-clear").hidden,
+  badgeHidden: document.getElementById("queue-badge").hidden,
+}));
+if (clearedState.summary) problems.push(`cleared summary ${clearedState.summary}`);
+if (!clearedState.summaryHidden) problems.push("empty summary line stayed visible");
+if (clearedState.emptyHidden) problems.push("empty queue message stayed hidden");
+if (!clearedState.clearHidden) problems.push("clear finished stayed visible");
+if (!clearedState.badgeHidden) problems.push("badge stayed visible after clear");
+await shot("07-queue-empty");
+await page.click("#view-queue-toggle");
+
 // The header gear opens settings and brings you back.
 await page.click("#view-toggle");
 const settingsShown = await page.evaluate(() => !document.getElementById("view-settings").hidden);
 const gearLabel = await page.evaluate(() => document.getElementById("view-toggle").title);
+await shot("08-settings");
 await page.click("#view-toggle");
 const exportShown = await page.evaluate(() => !document.getElementById("view-export").hidden);
 if (!settingsShown) problems.push("gear did not open settings");
 if (!exportShown) problems.push("gear did return to export");
 if (settingsShown && gearLabel !== "Back to export") problems.push(`gear label in settings: ${gearLabel}`);
 
+// An export that was mid-flight when the popup closed must come back as
+// failed, never completed. Seed that exact session state, reload, and read it.
+await page.evaluate(async () => {
+  await chrome.storage.session.set({
+    "meshport/queue/v1": [
+      {
+        id: "interrupted",
+        key: "interrupted",
+        name: "Interrupted Export",
+        platform: "tripo",
+        format: "stl",
+        status: "processing",
+        detail: "Starting...",
+        savedAs: "",
+        createdAt: 1,
+        updatedAt: 1,
+        entry: null,
+      },
+      {
+        id: "finished",
+        key: "finished",
+        name: "Finished Export",
+        platform: "tripo",
+        format: "stl",
+        status: "completed",
+        detail: "Finished Export.stl saved.",
+        savedAs: "Finished Export.stl",
+        createdAt: 2,
+        updatedAt: 2,
+        entry: null,
+      },
+    ],
+  });
+});
+await page.reload({ waitUntil: "load" });
+await waitCards();
+await page.click("#view-queue-toggle");
+await page.waitForFunction(
+  () => document.querySelectorAll("#queue-list .queue-item").length === 2,
+  { timeout: 10000 },
+);
+const restoredQueue = await page.evaluate(() => ({
+  items: [...document.querySelectorAll("#queue-list .queue-item")].map((item) => ({
+    name: item.querySelector(".queue-name")?.textContent || "",
+    status: item.dataset.status,
+    detail: item.querySelector(".queue-detail")?.textContent || "",
+  })),
+  badge: document.getElementById("queue-badge").textContent,
+  badgeHidden: document.getElementById("queue-badge").hidden,
+}));
+console.log("restored queue:", restoredQueue);
+const interrupted = restoredQueue.items.find((item) => item.name === "Interrupted Export");
+const finished = restoredQueue.items.find((item) => item.name === "Finished Export");
+if (interrupted?.status !== "failed") problems.push(`interrupted status ${interrupted?.status}`);
+if (!interrupted?.detail.includes("popup closed")) problems.push(`interrupted detail ${interrupted?.detail}`);
+if (finished?.status !== "completed") problems.push(`finished status ${finished?.status}`);
+if (restoredQueue.badgeHidden) problems.push("failed item did not keep the badge visible");
+if (restoredQueue.badge !== "1") problems.push(`restored badge ${restoredQueue.badge}`);
+await shot("09-queue-restored");
+
+// Empty-state capture for the visual audit; assertions are already done.
+await page.evaluate(() => {
+  showView("export");
+  document.body.dataset.platform = "meshy";
+  renderMeshyEmpty("No models in your Meshy workspace yet. Create one, then rescan.");
+  setStatus("No models in your Meshy workspace yet. Create one, then rescan.", "idle");
+});
+await shot("10-empty-library");
+
 if (problems.length) {
   console.log("FAIL:", problems);
   process.exitCode = 1;
 } else {
-  console.log("PASS: platform switch keeps Tripo whole and Meshy delivers the open model");
+  console.log("PASS: platform switch, Meshy batch, and the queued Tripo batch all behave");
 }
 
 await browser.close();

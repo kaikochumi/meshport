@@ -34,6 +34,26 @@ const resetSettingsButton = document.getElementById("reset-settings");
 const previewCount = document.getElementById("preview-count");
 const defaultFormatInputs = [...document.querySelectorAll('input[name="default-format"]')];
 const versionEl = document.getElementById("version");
+const searchInput = document.getElementById("search");
+const searchClear = document.getElementById("search-clear");
+const libraryTools = document.getElementById("library-tools");
+const sortDateButton = document.getElementById("sort-date");
+const sortNameButton = document.getElementById("sort-name");
+const selectBar = document.getElementById("select-bar");
+const selectCount = document.getElementById("select-count");
+const selectAllButton = document.getElementById("select-all");
+const selectClearButton = document.getElementById("select-clear");
+const exportSelectedButton = document.getElementById("export-selected");
+const queueToggle = document.getElementById("view-queue-toggle");
+const queueBadge = document.getElementById("queue-badge");
+const viewQueue = document.getElementById("view-queue");
+const queueList = document.getElementById("queue-list");
+const queueEmpty = document.getElementById("queue-empty");
+const queueSummaryLine = document.getElementById("queue-summary-line");
+const queueCount = document.getElementById("queue-count");
+const queueResumeButton = document.getElementById("queue-resume");
+const queueClearButton = document.getElementById("queue-clear");
+const queueToolbar = document.querySelector(".queue-toolbar");
 
 const FORMAT_LABELS = {
   stl: "Download STL",
@@ -76,6 +96,9 @@ const CAPTURE_POLL_MS = 700;
 
 let jobId = 0;
 let busy = false;
+let scanning = false;
+let scanRunId = 0;
+let queueRunning = false;
 let selectedEntry = null;
 let selectionKey = "";
 let inspectedKey = "";
@@ -91,6 +114,11 @@ let capturedModels = [];
 let learnedOperators = {};
 let idleWaiters = [];
 let scanToken = 0;
+let selectedKeys = new Set();
+let libraryQuery = "";
+let librarySort = "date";
+let batchNames = new Set();
+let queue = null;
 
 // Keeps the last download decisions so a wrong-model report can be traced.
 // Everything also goes to the popup console with a [Meshport] prefix.
@@ -228,7 +256,7 @@ async function downscaleImage(blob, max = 256) {
     canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
     bitmap.close();
     const url = canvas.toDataURL("image/webp", 0.85);
-    if (url.startsWith("data:image/webp/")) return url;
+    if (url.startsWith("data:image/webp;")) return url;
   } catch {
     // Drawing can fail on an unusual format; the original still works.
   }
@@ -329,11 +357,11 @@ function baseNameFromEntry(entry) {
 function entryMeta(entry) {
   if (entry.kind === "meshy") {
     const tris = Number(entry.counts?.triangles) || 0;
-    if (!tris) return "Open in Meshy";
+    if (!tris) return "Meshy";
     const label = tris >= 10000
       ? `${(tris / 1000).toFixed(1)}k tris`
       : `${tris.toLocaleString("en-US")} tris`;
-    return `Open in Meshy · ${label}`;
+    return `Meshy · ${label}`;
   }
   if (entry.kind === "library") {
     const scope = entry.scope === "collected" ? "Collected" : "My Assets";
@@ -345,8 +373,17 @@ function entryMeta(entry) {
     : "Detected in this tab";
 }
 
+// The card already says Meshy in the platform switch, so the hint must not
+// repeat it: "Open once in Meshy · 8,000 tris", never "Meshy · Meshy".
+function meshyNeedsLinkMeta(entry) {
+  const detail = entryMeta(entry);
+  return detail === "Meshy"
+    ? "Open once in Meshy · no link yet"
+    : `Open once in Meshy · ${detail.replace(/^Meshy\s*·\s*/, "")}`;
+}
+
 function waitForIdle() {
-  if (!busy) return Promise.resolve();
+  if (!busy && !scanning) return Promise.resolve();
   return new Promise((resolve) => idleWaiters.push(resolve));
 }
 
@@ -368,8 +405,8 @@ async function generateThumbnail(entry, card, token, key) {
 
   try {
     if (entry.kind === "meshy") {
-      // Meshy serves a finished render for the open model. Grab it instead
-      // of decoding the whole GLB for a picture.
+      // Meshy serves a finished render for each library model. Grab it
+      // instead of decoding the whole GLB for a picture.
       if (!entry.previewUrl) return;
       const image = await fetch(entry.previewUrl, { credentials: "omit" });
       if (!image.ok) return;
@@ -417,24 +454,40 @@ function setStatus(text, tone = "idle") {
 
 function updateActionState() {
   const hasModel = Boolean(selectedEntry);
-  inspectButton.disabled = busy || !hasModel;
-  convertButton.disabled = busy || !hasModel;
+  inspectButton.disabled = busy || scanning || queueRunning || !hasModel;
+  convertButton.disabled = busy || scanning || queueRunning || !hasModel;
+}
+
+// Conversions and library scans own different state. A scan finishing while a
+// conversion is still running must not re-enable the controls, and a platform
+// switch must stay possible while a scan is in flight.
+function syncBusyUi() {
+  const active = busy || scanning;
+  scanButton.disabled = active;
+  baseNameInput.disabled = active;
+  formatInputs.forEach((input) => {
+    input.disabled = active;
+  });
+  progress.hidden = !active;
+  updateActionState();
+  if (!active) {
+    const waiters = idleWaiters.splice(0);
+    waiters.forEach((resolve) => resolve());
+  }
 }
 
 function setBusy(isBusy, text) {
   busy = isBusy;
-  scanButton.disabled = isBusy;
-  baseNameInput.disabled = isBusy;
-  formatInputs.forEach((input) => {
-    input.disabled = isBusy;
-  });
-  progress.hidden = !isBusy;
+  platformButtons.tripo.disabled = isBusy;
+  platformButtons.meshy.disabled = isBusy;
+  syncBusyUi();
   if (text !== undefined) setStatus(text, isBusy ? "busy" : "ok");
-  updateActionState();
-  if (!isBusy) {
-    const waiters = idleWaiters.splice(0);
-    waiters.forEach((resolve) => resolve());
-  }
+}
+
+function setScanning(isScanning, text) {
+  scanning = isScanning;
+  syncBusyUi();
+  if (text !== undefined) setStatus(text, isScanning ? "busy" : "ok");
 }
 
 function sanitizeBaseName(value, fallback = "meshport-model") {
@@ -553,7 +606,7 @@ function clearPreviewCache() {
   }
   updatePreviewCount();
   if (cards.length && currentModelEntries.length) {
-    primeThumbnails(currentModelEntries, cards);
+    primeThumbnails(visibleEntries(), cards);
   } else {
     thumbnailObserver?.disconnect();
   }
@@ -561,15 +614,19 @@ function clearPreviewCache() {
 
 function showView(name) {
   const isSettings = name === "settings";
-  viewExport.hidden = isSettings;
+  const isQueue = name === "queue";
+  viewExport.hidden = isSettings || isQueue;
   viewSettings.hidden = !isSettings;
+  viewQueue.hidden = !isQueue;
   viewToggle.title = isSettings ? "Back to export" : "Open settings";
   viewToggle.setAttribute("aria-label", viewToggle.title);
   document.body.classList.toggle("settings-open", isSettings);
+  document.body.classList.toggle("queue-open", isQueue);
   if (isSettings) {
     updatePathPreview();
     updatePreviewCount();
   }
+  if (isQueue) renderQueue();
   document.querySelector("main").scrollTop = 0;
 }
 
@@ -1037,16 +1094,78 @@ function selectEntry(entry, focus = false) {
   updateActionState();
 }
 
-function fillLinks(entries) {
-  const token = ++scanToken;
-  entries = entries.filter((entry) => entry.url || entry.projectId);
-  currentModelEntries = entries;
-  selectedEntry = null;
-  selectionKey = "";
-  linksList.replaceChildren();
-  modelCount.textContent = String(entries.length);
+function entryByKey(key) {
+  return currentModelEntries.find((entry) => entryKey(entry) === key) || null;
+}
 
-  if (!entries.length) {
+function visibleEntries() {
+  return MeshportLibraryFilter.filterLibraryEntries(currentModelEntries, {
+    query: libraryQuery,
+    sort: librarySort,
+    titleOf: entryTitle,
+  });
+}
+
+// Search, sort, and selection all work on the list the last scan produced.
+// Nothing here asks a platform for data again.
+function setLibraryEntries(entries) {
+  currentModelEntries = entries.filter((entry) => entry.url || entry.projectId);
+  const keys = new Set(currentModelEntries.map((entry) => entryKey(entry)));
+  for (const key of [...selectedKeys]) {
+    const entry = currentModelEntries.find((item) => entryKey(item) === key);
+    if (!keys.has(key) || (entry && meshyNeedsLink(entry))) selectedKeys.delete(key);
+  }
+  renderModels();
+}
+
+function fillLinks(entries) {
+  setLibraryEntries(entries);
+}
+
+function applyQuery(value) {
+  libraryQuery = String(value || "");
+  searchInput.value = libraryQuery;
+  searchClear.hidden = !libraryQuery;
+  renderModels();
+}
+
+let searchTimer = 0;
+
+function setSort(next) {
+  librarySort = next === "name" ? "name" : "date";
+  sortDateButton.setAttribute("aria-pressed", String(librarySort === "date"));
+  sortNameButton.setAttribute("aria-pressed", String(librarySort === "name"));
+  renderModels();
+}
+
+function applyActiveSelection(entry) {
+  if (!entry) return;
+  selectedEntry = entry;
+  selectionKey = entryKey(entry);
+  for (const button of linksList.querySelectorAll(".model")) {
+    const isSelected = button.dataset.key === selectionKey;
+    button.setAttribute("aria-selected", String(isSelected));
+    button.tabIndex = isSelected ? 0 : -1;
+  }
+  updateActionState();
+}
+
+function renderModels() {
+  scanToken += 1; // older thumbnail jobs must not paint into this list
+  const entries = visibleEntries();
+  const filtering = Boolean(libraryQuery);
+  linksList.replaceChildren();
+  modelCount.textContent = filtering
+    ? `${entries.length}/${currentModelEntries.length}`
+    : String(entries.length);
+  libraryTools.hidden = currentModelEntries.length === 0;
+  selectBar.hidden = currentModelEntries.length === 0;
+
+  if (!currentModelEntries.length) {
+    selectedEntry = null;
+    selectionKey = "";
+    baseNameInput.value = "";
+    clearTextures();
     const empty = document.createElement("div");
     empty.className = "empty";
     const icon = document.createElement("span");
@@ -1062,12 +1181,42 @@ function fillLinks(entries) {
     empty.append(icon, text, reload);
     linksList.append(empty);
     updateActionState();
+    updateSelectionUi();
+    return;
+  }
+
+  if (!entries.length) {
+    selectedEntry = null;
+    selectionKey = "";
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    const icon = document.createElement("span");
+    icon.className = "empty-icon";
+    icon.innerHTML = MODEL_GLYPH;
+    const text = document.createElement("p");
+    text.textContent = `No models match "${libraryQuery}".`;
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "empty-reload";
+    clear.textContent = "Clear search";
+    clear.addEventListener("click", () => applyQuery(""));
+    empty.append(icon, text, clear);
+    linksList.append(empty);
+    updateActionState();
+    updateSelectionUi();
     return;
   }
 
   const cards = [];
   entries.forEach((entry, index) => {
     const key = entryKey(entry);
+    const needsLink = meshyNeedsLink(entry);
+    const row = document.createElement("div");
+    row.className = "model-row";
+    row.dataset.key = key;
+    row.classList.toggle("needs-link", needsLink);
+    if (selectedKeys.has(key)) row.classList.add("picked");
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = "model";
@@ -1090,16 +1239,75 @@ function fillLinks(entries) {
     name.textContent = entryTitle(entry);
     const meta = document.createElement("span");
     meta.className = "model-meta";
-    meta.textContent = entryMeta(entry);
+    meta.textContent = needsLink
+      ? meshyNeedsLinkMeta(entry)
+      : entryMeta(entry);
     text.append(name, meta);
 
+    const pick = document.createElement("label");
+    pick.className = "pick";
+    pick.title = needsLink
+      ? "Open this model once in Meshy, then rescan, to enable batch export"
+      : `Select ${entryTitle(entry)} for the export queue`;
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.key = key;
+    box.checked = selectedKeys.has(key);
+    box.disabled = needsLink;
+    box.setAttribute("aria-label", pick.title);
+    const tick = document.createElement("span");
+    tick.className = "pick-box";
+    pick.append(box, tick);
+
     button.append(thumb, text);
-    linksList.append(button);
+    row.append(button, pick);
+    linksList.append(row);
     cards.push(button);
   });
 
-  selectEntry(restoreSelection(entries) || entries[0]);
+  const active = selectedEntry
+    ? entries.find((entry) => entryKey(entry) === entryKey(selectedEntry))
+    : null;
+  if (active) applyActiveSelection(active);
+  else selectEntry(restoreSelection(entries) || entries[0]);
+
   primeThumbnails(entries, cards);
+  updateSelectionUi();
+}
+
+function toggleSelectedKey(key, checked) {
+  if (!key) return;
+  const entry = currentModelEntries.find((item) => entryKey(item) === key);
+  if (checked && entry && meshyNeedsLink(entry)) return;
+  if (checked) selectedKeys.add(key);
+  else selectedKeys.delete(key);
+  for (const row of linksList.querySelectorAll(".model-row")) {
+    if (row.dataset.key !== key) continue;
+    row.classList.toggle("picked", checked);
+    const box = row.querySelector('input[type="checkbox"]');
+    if (box) box.checked = checked;
+  }
+  updateSelectionUi();
+}
+
+function updateSelectionUi() {
+  const count = selectedKeys.size;
+  const visible = visibleEntries();
+  const exportable = visible.filter((entry) => !meshyNeedsLink(entry));
+  const visibleSelected = visible.filter((entry) => selectedKeys.has(entryKey(entry))).length;
+  const exportableSelected = exportable.filter((entry) => selectedKeys.has(entryKey(entry))).length;
+  const hiddenSelected = Math.max(0, count - visibleSelected);
+  selectCount.textContent = count
+    ? `${count} selected${hiddenSelected ? `, ${visibleSelected} shown` : ""}`
+    : "None selected";
+  // A Meshy model with no captured link cannot be selected, so it must not
+  // keep Select all enabled after every exportable model is picked.
+  selectAllButton.disabled = exportable.length === 0 || exportableSelected >= exportable.length;
+  selectClearButton.disabled = count === 0;
+  // Hidden models are deliberately never exported, so the button counts what
+  // the queue will actually receive.
+  exportSelectedButton.disabled = exportableSelected === 0;
+  exportSelectedButton.textContent = exportableSelected ? `Export ${exportableSelected}` : "Export";
 }
 
 function primeThumbnails(entries, cards) {
@@ -1249,27 +1457,52 @@ async function fetchGlbFromUrl(url) {
 // or .zip link, so skip the rest instead of downloading the whole file first.
 const NON_GLB_URL = /\.(?:fbx|obj|gltf|usdz|dae|stl|ply)(?:$|[?#])/i;
 
-// Meshy signs its GLB links and the signature expires. When a download
-// comes back expired, ask the Meshy tab for a fresh link and retry once.
+// The library answer usually carries each finished model's signed link. Keep
+// the entry updated when a link is refreshed, so the queue and the list point
+// at the same URL.
+function adoptMeshyEntry(entry, url) {
+  entry.url = url;
+  const index = currentModelEntries.findIndex((item) => entryKey(item) === entryKey(entry));
+  if (index >= 0) currentModelEntries[index] = entry;
+  const meshyList = entriesByPlatform.meshy;
+  const meshyIndex = meshyList.findIndex((item) => entryKey(item) === entryKey(entry));
+  if (meshyIndex >= 0) meshyList[meshyIndex] = entry;
+  if (selectedEntry && entryKey(selectedEntry) === entryKey(entry)) selectedEntry = entry;
+}
+
+async function ensureMeshyUrl(entry) {
+  if (entry.url) return entry.url;
+  if (!entry.projectId) {
+    throw new Error("Meshy did not send a task id for this model. Rescan and try again.");
+  }
+  setStatus(`Reading ${entryTitle(entry)} from Meshy...`, "busy");
+  const response = await getMeshyUrlResponse(entry.projectId);
+  const url = typeof response?.url === "string" ? response.url : "";
+  if (!url) throw new Error("Meshy has no GLB ready for this model yet.");
+  adoptMeshyEntry(entry, url);
+  if (response.previewUrl && !entry.previewUrl) entry.previewUrl = response.previewUrl;
+  return url;
+}
+
+// Meshy signs its GLB links and the signature expires. When a download comes
+// back expired, ask the Meshy tab to re-read the library for that task first;
+// the status endpoint is a token-only fallback.
 async function fetchMeshyGlb(entry, allowRefresh = true) {
+  await ensureMeshyUrl(entry);
   let bytes;
   try {
     bytes = new Uint8Array(await fetchArrayBuffer(entry.url, "Meshy"));
   } catch (error) {
     if (!allowRefresh || !isExpiredLinkError(error)) throw error;
-    setBusy(true, "Refreshing the Meshy link...");
-    const response = await getMeshyModelResponse();
-    const fresh = meshyEntryFrom(response.model);
-    if (entryKey(fresh) === entryKey(entry)) {
-      const index = currentModelEntries.findIndex((item) => entryKey(item) === entryKey(entry));
-      if (index >= 0) currentModelEntries[index] = fresh;
-      entriesByPlatform.meshy = currentModelEntries.slice();
-      if (selectedEntry === entry) selectedEntry = fresh;
-    }
+    setStatus("Refreshing the Meshy link...", "busy");
+    const response = await getMeshyUrlResponse(entry.projectId, { fresh: true }).catch(() => null);
+    const url = typeof response?.url === "string" ? response.url : "";
+    if (!url) throw new Error("The Meshy link expired. Rescan the Meshy library, then retry.");
+    adoptMeshyEntry(entry, url);
     try {
-      return await fetchMeshyGlb(fresh, false);
+      return await fetchMeshyGlb(entry, false);
     } catch {
-      throw new Error("The Meshy link expired. Reload the Meshy tab, open the model, then rescan.");
+      throw new Error("The Meshy link expired. Rescan the Meshy library, then retry.");
     }
   }
   if (meshportModelKind(bytes) !== "glb") {
@@ -1280,8 +1513,10 @@ async function fetchMeshyGlb(entry, allowRefresh = true) {
   return bytes.buffer;
 }
 
-async function fetchSelectedBuffer() {
-  const entry = selectedEntry;
+// Resolves one model's GLB bytes. The single download and the export queue
+// both go through here, so a batch never quietly reimplements the rules about
+// which Tripo file is trusted.
+async function fetchEntryBuffer(entry, options = {}) {
   if (!entry) throw new Error("No model selected.");
   if (entry.kind === "meshy") {
     logDownload("download-start", {
@@ -1378,6 +1613,11 @@ async function fetchSelectedBuffer() {
     );
   }
 
+  // A batch should not walk the user's Tripo tab through models one by one.
+  if (options.allowTabNavigation === false) {
+    throw new Error("Open this model in Tripo once, then rescan before queuing it.");
+  }
+
   setStatus("Tripo stores this model in another format. Opening it to read the GLB...", "busy");
   const captured = await openProjectAndCapture(entry.projectId, acceptedStems(entry));
   const glb = captured.glb || await fetchGlbFromUrl(captured.url);
@@ -1390,6 +1630,10 @@ async function fetchSelectedBuffer() {
   return glb;
 }
 
+function fetchSelectedBuffer() {
+  return fetchEntryBuffer(selectedEntry);
+}
+
 // Some models only exist on Tripo as an FBX (quad topology, for example). The
 // FBX card downloads that native file straight from the project detail link,
 // exactly as Tripo stores it, instead of converting a GLB.
@@ -1397,7 +1641,6 @@ async function fetchNativeModel(entry) {
   if (!entry?.projectId) {
     throw new Error("Open the model in Tripo so Meshport can find its native file.");
   }
-  setBusy(true, "Reading the project file...");
   const url = await resolveLibraryEntry(entry, true);
   const bytes = new Uint8Array(await fetchArrayBuffer(url));
   const kind = meshportModelKind(bytes);
@@ -1425,7 +1668,7 @@ async function runSandboxJob(request, fallbackUrl) {
   }
 }
 
-function convertSelected(key, format, buffer, baseName) {
+function convertEntry(entry, key, format, buffer, baseName) {
   const png = (format === "obj" || format === "gltf") && pngCheckbox.checked;
   return runSandboxJob({
     type: "convert",
@@ -1434,7 +1677,11 @@ function convertSelected(key, format, buffer, baseName) {
     format,
     options: { png, baseName },
     baseName,
-  }, selectedEntry?.url || "");
+  }, entry?.url || "");
+}
+
+function convertSelected(key, format, buffer, baseName) {
+  return convertEntry(selectedEntry, key, format, buffer, baseName);
 }
 
 function formatBytes(size) {
@@ -1517,8 +1764,17 @@ function renderMeshyEmpty(message) {
   entriesByPlatform.meshy = [];
   selectedEntry = null;
   selectionKey = "";
+  baseNameInput.value = "";
+  clearTextures();
+  selectedKeys.clear();
+  libraryQuery = "";
+  searchInput.value = "";
+  searchClear.hidden = true;
   linksList.replaceChildren();
   modelCount.textContent = "0";
+  libraryTools.hidden = true;
+  selectBar.hidden = true;
+  updateSelectionUi();
   const empty = document.createElement("div");
   empty.className = "empty";
   const icon = document.createElement("span");
@@ -1562,16 +1818,30 @@ function renderPlatformView() {
     prompt.textContent = "Reading your Tripo library...";
     linksList.append(prompt);
     modelCount.textContent = "0";
+    selectedEntry = null;
+    selectionKey = "";
+    selectedKeys.clear();
+    libraryTools.hidden = true;
+    selectBar.hidden = true;
     setStatus("Tripo selected. Rescan to read your library.", "idle");
     updateActionState();
+    updateSelectionUi();
   }
 }
 
 function setPlatform(next) {
   if (next === platform) return;
+  // A library scan or a conversion owns the shared busy state; switching
+  // mid-flight would let its finally block re-enable controls too early.
+  if (busy) return;
   entriesByPlatform[platform] = currentModelEntries.slice();
   platform = next;
   rememberPlatform();
+  // A search for a Tripo model should not hide the Meshy list the moment you
+  // switch sources, so the query resets with the library.
+  libraryQuery = "";
+  searchInput.value = "";
+  searchClear.hidden = true;
   renderPlatformView();
   scan();
 }
@@ -1580,9 +1850,9 @@ platformButtons.tripo.addEventListener("click", () => setPlatform("tripo"));
 platformButtons.meshy.addEventListener("click", () => setPlatform("meshy"));
 
 // Meshy. The workspace keeps its API on www.meshy.ai with session cookies,
-// so the tab's content script answers with the open model and a fresh
+// so the tab's content script answers for the library and for each model's
 // signed GLB link.
-async function getMeshyModelResponse() {
+async function sendMeshyMessage(type, payload = {}) {
   const MESHY_TAB_URLS = ["*://*.meshy.ai/*"];
   let tabs = [];
   try {
@@ -1604,7 +1874,7 @@ async function getMeshyModelResponse() {
   let unreachable = false;
   for (const tab of ordered) {
     try {
-      const response = await chrome.tabs.sendMessage(tab.id, { type: "get-meshy-model" });
+      const response = await chrome.tabs.sendMessage(tab.id, { type, ...payload });
       if (response?.ok) return response;
       if (response?.error) responseError = response.error;
     } catch {
@@ -1617,6 +1887,14 @@ async function getMeshyModelResponse() {
   );
 }
 
+function getMeshyLibraryResponse() {
+  return sendMeshyMessage("get-meshy-library");
+}
+
+function getMeshyUrlResponse(taskId, { fresh = false } = {}) {
+  return sendMeshyMessage("get-meshy-url", { taskId, fresh });
+}
+
 function meshyEntryFrom(model) {
   return {
     ...model,
@@ -1626,36 +1904,52 @@ function meshyEntryFrom(model) {
 }
 
 async function scanMeshy() {
+  const runId = ++scanRunId;
   scanButton.classList.add("spinning");
   const myPlatform = platform;
   try {
-    setBusy(true, "Reading your Meshy model...");
-    const response = await getMeshyModelResponse();
-    if (platform !== myPlatform) return; // the user switched away mid-scan
-    const entry = meshyEntryFrom(response.model);
-    fillLinks([entry]);
+    setScanning(true, "Reading your Meshy library...");
+    const response = await getMeshyLibraryResponse();
+    if (runId !== scanRunId || platform !== myPlatform) return;
+    const models = Array.isArray(response.models) ? response.models : [];
+    if (!models.length) {
+      renderMeshyEmpty("No models in your Meshy workspace yet. Create one, then rescan.");
+      setStatus("No models in your Meshy workspace yet. Create one, then rescan.", "idle");
+      return;
+    }
+    const entries = models.map(meshyEntryFrom);
+    fillLinks(entries);
     entriesByPlatform.meshy = currentModelEntries.slice();
-    setStatus(`${entryTitle(entry)} is ready. Pick a format and download.`, "ok");
+    const hint = response.captured ? " Showing the last scan." : "";
+    setStatus(
+      `${entries.length} model${entries.length === 1 ? "" : "s"} in your Meshy library.${hint}`,
+      response.captured ? "idle" : "ok",
+    );
   } catch (error) {
-    if (platform !== myPlatform) return;
+    if (runId !== scanRunId || platform !== myPlatform) return;
     renderMeshyEmpty(error.message);
     setStatus(error.message, "error");
   } finally {
-    scanButton.classList.remove("spinning");
-    setBusy(false);
+    if (runId === scanRunId) {
+      scanButton.classList.remove("spinning");
+      setScanning(false);
+    }
   }
 }
 
 async function scan() {
   if (platform === "meshy") return scanMeshy();
+  const runId = ++scanRunId;
   scanButton.classList.add("spinning");
   try {
-    setBusy(true, "Reading your Tripo library...");
+    setScanning(true, "Reading your Tripo library...");
     const [linksResult, libraryResult] = await Promise.allSettled([
       getLinksFromActiveTab(),
       getLibraryFromTab(),
       refreshCapturedModels(),
     ]);
+    // A platform switch starts a new scan; this one is stale now.
+    if (runId !== scanRunId) return;
     const links = linksResult.status === "fulfilled" ? linksResult.value : [];
     const projects = libraryResult.status === "fulfilled"
       ? libraryResult.value.projects || []
@@ -1698,10 +1992,13 @@ async function scan() {
       fromLibrary && !libraryError && !cachedLibrary ? "ok" : "idle",
     );
   } catch (error) {
+    if (runId !== scanRunId) return;
     setStatus(`Scan error: ${error.message}`, "error");
   } finally {
-    scanButton.classList.remove("spinning");
-    setBusy(false);
+    if (runId === scanRunId) {
+      scanButton.classList.remove("spinning");
+      setScanning(false);
+    }
   }
 }
 
@@ -1803,10 +2100,16 @@ textureBox.addEventListener("toggle", () => {
 linksList.addEventListener("click", (event) => {
   const button = event.target.closest(".model");
   if (button) {
-    selectEntry(currentModelEntries[Number(button.dataset.index)]);
+    selectEntry(entryByKey(button.dataset.key));
     return;
   }
   if (event.target.closest('[data-action="reload-tab"]')) reloadActiveTab();
+});
+
+linksList.addEventListener("change", (event) => {
+  const box = event.target.closest('.pick input[type="checkbox"]');
+  if (!box) return;
+  toggleSelectedKey(box.dataset.key, box.checked);
 });
 
 // Power users: a double-click downloads the card with the current format.
@@ -1828,7 +2131,320 @@ linksList.addEventListener("keydown", (event) => {
   if (next === null) return;
 
   event.preventDefault();
-  selectEntry(currentModelEntries[Number(buttons[next].dataset.index)], true);
+  selectEntry(entryByKey(buttons[next].dataset.key), true);
+});
+
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => applyQuery(searchInput.value), 80);
+});
+
+searchClear.addEventListener("click", () => {
+  applyQuery("");
+  searchInput.focus();
+});
+
+sortDateButton.addEventListener("click", () => setSort("date"));
+sortNameButton.addEventListener("click", () => setSort("name"));
+
+selectAllButton.addEventListener("click", () => {
+  for (const row of linksList.querySelectorAll(".model-row")) {
+    // A Meshy model with no captured link cannot be exported yet; selecting
+    // it would only make the batch count lie.
+    if (row.classList.contains("needs-link")) continue;
+    selectedKeys.add(row.dataset.key);
+    row.classList.add("picked");
+    const box = row.querySelector('input[type="checkbox"]');
+    if (box) box.checked = true;
+  }
+  updateSelectionUi();
+});
+
+selectClearButton.addEventListener("click", () => {
+  selectedKeys.clear();
+  for (const row of linksList.querySelectorAll(".model-row")) {
+    row.classList.remove("picked");
+    const box = row.querySelector('input[type="checkbox"]');
+    if (box) box.checked = false;
+  }
+  updateSelectionUi();
+});
+
+// Batch export. The selection goes into a queue, and the queue drains one
+// model at a time; each item keeps its own status so one failure never hides
+// the rest of the batch.
+const QUEUE_STORAGE_KEY = "meshport/queue/v1";
+const QUEUE_STATUS_LABELS = {
+  waiting: "Waiting",
+  processing: "Exporting",
+  completed: "Done",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+function selectedEntries() {
+  return visibleEntries().filter((entry) => selectedKeys.has(entryKey(entry)));
+}
+
+// Meshy only hands out signed GLB links in answers the workspace itself
+// received. A model the sidebar never loaded has a task id but no link, and
+// queuing it would just fail after the batch starts. Separate those before
+// they become queue items.
+function meshyNeedsLink(entry) {
+  return entry.kind === "meshy" && !entry.url && Boolean(entry.projectId);
+}
+
+// The name is picked once per queue item, so retrying a failed download keeps
+// the same stem instead of growing a new suffix every attempt.
+function queuedBaseName(item) {
+  if (item.baseName) return item.baseName;
+  const fallback = item.entry ? baseNameFromEntry(item.entry) : "meshport-model";
+  item.baseName = MeshportExportQueue.nextUniqueName(
+    batchNames,
+    sanitizeBaseName(item.name, fallback),
+  );
+  return item.baseName;
+}
+
+async function runQueueItem(item, { setDetail }) {
+  const entry = item.entry;
+  const format = item.format;
+  if (!entry) throw new Error("This entry lost its model. Rescan and queue it again.");
+
+  if (format === "fbx") {
+    if (entry.kind === "meshy") {
+      throw new Error("FBX is Tripo-only. Meshport reads only the GLB from Meshy.");
+    }
+    setDetail("Reading the project file...");
+    const native = await fetchNativeModel(entry);
+    const mimeType = native.ext === "zip"
+      ? "application/zip"
+      : native.ext === "glb"
+        ? "model/gltf-binary"
+        : "application/octet-stream";
+    const fileName = `${queuedBaseName(item)}.${native.ext}`;
+    setDetail(FORMAT_SAVE.fbx || "Saving FBX...");
+    await downloadBlob(new Blob([native.bytes], { type: mimeType }), fileName);
+    item.savedAs = fileName;
+    noteDownloadSuccess();
+    return;
+  }
+
+  setDetail(FORMAT_PROGRESS[format] || "Downloading the GLB...");
+  // A batch never walks the user's Tripo tab through models one by one.
+  const buffer = await fetchEntryBuffer(entry, { allowTabNavigation: false });
+  const baseName = queuedBaseName(item);
+  setDetail(FORMAT_PROGRESS[format] || "Converting...");
+  const response = await convertEntry(entry, entryKey(entry), format, buffer, baseName);
+  const { result } = response;
+  item.savedAs = result.fileName;
+  setDetail(FORMAT_SAVE[format] || "Saving file...");
+  await downloadBlob(new Blob([result.bytes], { type: result.mimeType }), result.fileName);
+  noteDownloadSuccess();
+}
+
+function queueItemNode(item) {
+  const li = document.createElement("li");
+  li.className = "queue-item";
+  li.dataset.status = item.status;
+  li.dataset.id = item.id;
+
+  const head = document.createElement("div");
+  head.className = "queue-head";
+  const name = document.createElement("strong");
+  name.className = "queue-name";
+  name.textContent = item.name;
+  const source = document.createElement("span");
+  source.className = "queue-source";
+  source.dataset.platform = item.platform;
+  source.textContent = item.platform === "meshy" ? "Meshy" : "Tripo";
+  head.append(name, source);
+
+  const line = document.createElement("div");
+  line.className = "queue-line";
+  const status = document.createElement("span");
+  status.className = "queue-status";
+  status.textContent = QUEUE_STATUS_LABELS[item.status] || item.status;
+  const format = document.createElement("span");
+  format.className = "queue-format";
+  format.textContent = String(item.format || "stl").toUpperCase();
+  line.append(status, format);
+  if (item.detail) {
+    const detail = document.createElement("span");
+    detail.className = "queue-detail";
+    detail.textContent = item.detail;
+    line.append(detail);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "queue-item-actions";
+  if (item.status === "waiting") {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "link-button";
+    cancel.dataset.action = "cancel";
+    cancel.textContent = "Cancel";
+    actions.append(cancel);
+  } else if (item.status === "failed") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "link-button";
+    retry.dataset.action = "retry";
+    retry.textContent = "Retry";
+    actions.append(retry);
+  }
+
+  li.append(head, line, actions);
+  return li;
+}
+
+let queueWasRunning = false;
+
+function renderQueue() {
+  if (!queue) return;
+  const snapshot = queue.snapshot();
+  const summary = snapshot.summary;
+  queueCount.textContent = String(snapshot.items.length);
+
+  const parts = [];
+  if (summary.completed) parts.push(`${summary.completed} done`);
+  if (summary.processing) parts.push(`${summary.processing} exporting`);
+  if (summary.waiting) parts.push(`${summary.waiting} waiting`);
+  if (summary.failed) parts.push(`${summary.failed} failed`);
+  if (summary.cancelled) parts.push(`${summary.cancelled} cancelled`);
+  queueSummaryLine.textContent = parts.join(" · ");
+  // The empty state already explains the next step; a summary line above it
+  // would only repeat that there is nothing here.
+  queueSummaryLine.hidden = parts.length === 0;
+
+  // The queue redraws on every progress detail. Keep the list's scroll and the
+  // focused Cancel/Retry button so a running batch does not yank either away.
+  const scrollTop = queueList.scrollTop;
+  const active = document.activeElement;
+  const focusAction = active?.dataset?.action && queueList.contains(active)
+    ? active.dataset.action
+    : "";
+  const focusId = focusAction ? active.closest(".queue-item")?.dataset.id || "" : "";
+
+  queueEmpty.hidden = snapshot.items.length > 0;
+  queueList.replaceChildren();
+  for (const item of snapshot.items) queueList.append(queueItemNode(item));
+  queueList.scrollTop = scrollTop;
+
+  if (focusId) {
+    const row = [...queueList.querySelectorAll(".queue-item")]
+      .find((item) => item.dataset.id === focusId);
+    row?.querySelector(`[data-action="${focusAction}"]`)?.focus({ preventScroll: true });
+  }
+
+  queueResumeButton.hidden = !(summary.waiting && !snapshot.running);
+  queueClearButton.hidden = !(summary.completed || summary.cancelled);
+  // A hidden button still counts as a child, so :empty never matched here.
+  queueToolbar.hidden = queueResumeButton.hidden && queueClearButton.hidden;
+
+  const pending = summary.waiting + summary.processing + summary.failed;
+  queueBadge.hidden = pending === 0;
+  queueBadge.textContent = String(pending);
+
+  if (queueWasRunning && !snapshot.running) {
+    setStatus(
+      summary.failed
+        ? `Queue finished. ${summary.completed} exported, ${summary.failed} failed.`
+        : `Queue finished. ${summary.completed} model${summary.completed === 1 ? "" : "s"} exported.`,
+      summary.failed ? "error" : "ok",
+    );
+  }
+  queueWasRunning = snapshot.running;
+  if (queueRunning !== snapshot.running) {
+    queueRunning = snapshot.running;
+    updateActionState();
+  }
+
+  if (!snapshot.items.length) batchNames = new Set();
+}
+
+function saveQueueState(items) {
+  try {
+    chrome.storage.session.set({ [QUEUE_STORAGE_KEY]: items }).catch(() => {});
+  } catch {
+    // Persistence is best effort.
+  }
+}
+
+async function loadQueueState() {
+  try {
+    const stored = await chrome.storage.session.get(QUEUE_STORAGE_KEY);
+    const items = stored?.[QUEUE_STORAGE_KEY];
+    return Array.isArray(items) ? items : [];
+  } catch {
+    return [];
+  }
+}
+
+function exportSelection() {
+  if (!queue) return;
+  const format = currentFormat();
+  if (format === "fbx" && platform === "meshy") {
+    setStatus("Meshport reads only the GLB from Meshy. FBX is Tripo-only.", "error");
+    return;
+  }
+  const selected = selectedEntries();
+  if (!selected.length) {
+    setStatus("Select at least one model first.", "idle");
+    return;
+  }
+  const entries = selected.filter((entry) => !meshyNeedsLink(entry));
+  const skipped = selected.length - entries.length;
+  if (!entries.length) {
+    setStatus(
+      `${skipped} selected Meshy model${skipped === 1 ? " has" : "s have"} no download link. Open ${skipped === 1 ? "it" : "them"} once in Meshy, then rescan.`,
+      "error",
+    );
+    return;
+  }
+
+  const added = queue.add(entries.map((entry) => ({
+    entry,
+    key: entryKey(entry),
+    name: entryTitle(entry),
+    platform: entry.kind === "meshy" ? "meshy" : "tripo",
+    format,
+  })));
+  if (!added) {
+    setStatus("Those models are already queued.", "idle");
+    showView("queue");
+    return;
+  }
+
+  const skippedHint = skipped
+    ? ` Skipped ${skipped} Meshy model${skipped === 1 ? "" : "s"} without a download link; open ${skipped === 1 ? "it" : "them"} once in Meshy, then rescan.`
+    : "";
+  setStatus(
+    `Queued ${added} model${added === 1 ? "" : "s"} as ${String(format).toUpperCase()}.${skippedHint}`,
+    skipped ? "idle" : "ok",
+  );
+  showView("queue");
+  queue.start();
+}
+
+exportSelectedButton.addEventListener("click", exportSelection);
+
+queueList.addEventListener("click", (event) => {
+  if (!queue) return;
+  const action = event.target.closest("[data-action]");
+  const row = event.target.closest(".queue-item");
+  if (!action || !row) return;
+  if (action.dataset.action === "cancel") queue.cancel(row.dataset.id);
+  if (action.dataset.action === "retry") {
+    queue.retry(row.dataset.id);
+    queue.start();
+  }
+});
+
+queueResumeButton.addEventListener("click", () => queue?.start());
+queueClearButton.addEventListener("click", () => queue?.clearFinished());
+queueToggle.addEventListener("click", () => {
+  showView(viewQueue.hidden ? "queue" : "export");
 });
 
 inspectButton.addEventListener("click", async () => {
@@ -1879,6 +2495,7 @@ convertButton.addEventListener("click", async () => {
       return;
     }
     if (format === "fbx") {
+      setBusy(true, "Reading the project file...");
       const native = await fetchNativeModel(entry);
       const mimeType = native.ext === "zip"
         ? "application/zip"
@@ -1924,6 +2541,27 @@ setFormat(preferences.format || "stl");
 if (typeof preferences.png === "boolean") pngCheckbox.checked = preferences.png;
 syncSettingsUi();
 versionEl.textContent = chrome.runtime.getManifest().version;
+
+// The queue restores before the first render so an interrupted batch reads
+// honestly: items that were mid-flight come back as failed, not completed.
+queue = MeshportExportQueue.createExportQueue({
+  run: runQueueItem,
+  persist: saveQueueState,
+  onChange: renderQueue,
+});
+loadQueueState().then((stored) => {
+  queue.restore(stored);
+  // Restored items keep the name they already used, so new exports must not
+  // hand the same stem to a second model.
+  batchNames = new Set(
+    queue
+      .snapshot()
+      .items.map((item) => String(item.baseName || "").toLowerCase())
+      .filter(Boolean),
+  );
+  renderQueue();
+});
+
 showView("export");
 renderPlatformView();
 updateActionState();

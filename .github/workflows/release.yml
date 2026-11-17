@@ -23,14 +23,14 @@ jobs:
           name: Meshport ${{ github.ref_name }}
           files: meshport-${{ github.ref_name }}.zip
           body: |
-            Meshy joins Tripo.
+            You can now queue several models and let Meshport export them one at a time.
 
-            The popup now has a Tripo and a Meshy switch, and each platform keeps its own list and its own theme. On Meshy, Meshport reads the model you have open in your workspace: the page already fetched everything while you worked, and a small script inside the tab hands it over. The extension never calls the Meshy API and needs no login or key. Save the open model as STL, OBJ, glTF, GLB, or a zip of textures. There is no FBX on Meshy, because that native file only exists inside a Tripo project.
+            Search and sort work on the library you already scanned. Type a name to filter it, switch between newest and name order, then tick the cards you want or press Select all for whatever the search shows. Export N sends that selection to the queue.
 
-            Meshy signs its download links, and the signature runs out after a while. When one does, reload the Meshy tab, open the model again, then rescan: the workspace fetches a fresh link on its own.
+            Each queue item moves through waiting, exporting, done, failed, or cancelled. Cancel an item that has not started, retry a failed one, and clear finished work when the list gets long. The header badge counts what is still unfinished. The queue is stored in chrome.storage.session: a popup reload keeps finished items, and an item that was mid-flight comes back as failed with an interrupted message.
 
-            Tripo keeps everything from before: the full library with covers, verified downloads, and the native FBX path.
+            Batch export does not open or move your Tripo tab. If Tripo cannot resolve a model as a GLB without that step, the item fails with a note to open it once and rescan, and the rest of the batch continues. On Meshy, the popup now lists the whole workspace library and keeps the signed links the workspace page fetched, so you can queue models you never opened as long as the workspace has listed them. A model the page never loaded has no link: its card tells you to open it once, its checkbox stays disabled, and Select all leaves it out. FBX remains Tripo-only.
 
-            The thumbnail cache now writes once per scan instead of once per card, and Meshy previews are stored at card size, so the cache stays small and lasts longer. The empty states carry their own buttons: Reload tab on Tripo, Rescan on Meshy.
+            Tripo and Meshy still share the rest of the workflow: covers, verified downloads, the native FBX path, and Meshy reading with the session already active in your browser.
 
-            Install: unpack the zip and load the chrome-extension folder on your browser's extensions page with developer mode on. The README has the full steps. After updating, reload your Tripo and Meshy tabs so the new content scripts go live.
+            To install, unpack the zip and load the chrome-extension folder from your browser's extensions page with developer mode on. The README has the full steps. After updating, reload your Tripo and Meshy tabs so the new content scripts go live.
