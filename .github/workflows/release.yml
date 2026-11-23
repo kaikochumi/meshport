@@ -13,24 +13,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Zip the extension
-        run: zip -qr "meshport-${{ github.ref_name }}.zip" chrome-extension
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
 
-      # Update the body below when you tag the next version.
-      - name: Create the release
+          tag = os.environ["RELEASE_TAG"]
+          version = tag.removeprefix("v")
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = rf"(?ms)^## \[{re.escape(version)}\] - [^\n]+\n(.*?)(?=^## \[|\Z)"
+          match = re.search(pattern, changelog)
+          if match is None:
+              raise SystemExit(f"Missing changelog entry for {tag}")
+
+          notes = (
+              f"Meshport {version} adds export presets, an interactive 3D preview, "
+              "and local download history, with improvements to library loading "
+              "and large-file handling.\n\n"
+              f"## Changes\n\n{match.group(1).strip()}\n\n"
+              "## Install or update\n\n"
+              f"1. Download `meshport-{tag}.zip` from the assets below and extract it.\n"
+              "2. Open `chrome://extensions` (Chrome) or `edge://extensions` (Edge).\n"
+              "3. Enable **Developer mode**, then select **Load unpacked**.\n"
+              "4. Choose the extracted `chrome-extension` folder.\n\n"
+              "To update an existing installation, replace the extension folder "
+              "and click **Reload** on the extensions page. Reload your Tripo "
+              "and Meshy tabs afterwards.\n\n"
+              "FBX exports are available for Tripo models only.\n"
+          )
+          Path("release-notes.md").write_text(notes, encoding="utf-8")
+          PY
+
+      - name: Package the extension
+        run: |
+          zip -qr "meshport-${{ github.ref_name }}.zip" chrome-extension
+          sha256sum "meshport-${{ github.ref_name }}.zip" > "meshport-${{ github.ref_name }}.sha256"
+
+      - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
           name: Meshport ${{ github.ref_name }}
-          files: meshport-${{ github.ref_name }}.zip
-          body: |
-            You can now queue several models and let Meshport export them one at a time.
-
-            Search and sort work on the library you already scanned. Type a name to filter it, switch between newest and name order, then tick the cards you want or press Select all for whatever the search shows. Export N sends that selection to the queue.
-
-            Each queue item moves through waiting, exporting, done, failed, or cancelled. Cancel an item that has not started, retry a failed one, and clear finished work when the list gets long. The header badge counts what is still unfinished. The queue is stored in chrome.storage.session: a popup reload keeps finished items, and an item that was mid-flight comes back as failed with an interrupted message.
-
-            Batch export does not open or move your Tripo tab. If Tripo cannot resolve a model as a GLB without that step, the item fails with a note to open it once and rescan, and the rest of the batch continues. On Meshy, the popup now lists the whole workspace library and keeps the signed links the workspace page fetched, so you can queue models you never opened as long as the workspace has listed them. A model the page never loaded has no link: its card tells you to open it once, its checkbox stays disabled, and Select all leaves it out. FBX remains Tripo-only.
-
-            Tripo and Meshy still share the rest of the workflow: covers, verified downloads, the native FBX path, and Meshy reading with the session already active in your browser.
-
-            To install, unpack the zip and load the chrome-extension folder from your browser's extensions page with developer mode on. The README has the full steps. After updating, reload your Tripo and Meshy tabs so the new content scripts go live.
+          body_path: release-notes.md
+          files: |
+            meshport-${{ github.ref_name }}.zip
+            meshport-${{ github.ref_name }}.sha256
+          fail_on_unmatched_files: true
