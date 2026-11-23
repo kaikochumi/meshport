@@ -816,11 +816,11 @@ async function buildPreviews(textures) {
   return previews;
 }
 
-function thumbnailView() {
-  const cosY = Math.cos(-0.62);
-  const sinY = Math.sin(-0.62);
-  const cosX = Math.cos(0.34);
-  const sinX = Math.sin(0.34);
+function thumbnailView(angle = -0.62, elevation = 0.34) {
+  const cosY = Math.cos(angle);
+  const sinY = Math.sin(angle);
+  const cosX = Math.cos(elevation);
+  const sinX = Math.sin(elevation);
   return (point) => {
     const x = point[0] * cosY + point[2] * sinY;
     const z = -point[0] * sinY + point[2] * cosY;
@@ -883,7 +883,7 @@ function sampleThumbnailColor(sampler, uv) {
   ];
 }
 
-async function renderThumbnail(gltf, bin, size = 128) {
+async function renderThumbnail(gltf, bin, size = 128, options = {}) {
   if (typeof document === "undefined") throw new Error("Thumbnails need a browser canvas.");
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -905,7 +905,10 @@ async function renderThumbnail(gltf, bin, size = 128) {
   }
   if (!parts.length || !triangles) throw new Error("The model has no triangles to preview.");
 
-  const view = thumbnailView();
+  const view = thumbnailView(
+    Number.isFinite(options.angle) ? options.angle : -0.62,
+    Number.isFinite(options.elevation) ? Math.max(-1.45, Math.min(1.45, options.elevation)) : 0.34,
+  );
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -922,7 +925,8 @@ async function renderThumbnail(gltf, bin, size = 128) {
 
   const spread = Math.max(maxX - minX, maxY - minY) || 1;
   const padding = size * 0.12;
-  const scale = (size - padding * 2) / spread;
+  const scale = (size - padding * 2) / spread
+    * (Number.isFinite(options.zoom) ? Math.max(0.45, Math.min(3, options.zoom)) : 1);
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
   const project = (point) => {
@@ -1010,13 +1014,20 @@ async function handleSandboxMessage(event) {
     event.source.postMessage({ type: "pong", id: data.id }, event.origin);
     return;
   }
-  if (data.type !== "convert" && data.type !== "inspect" && data.type !== "thumbnail") return;
+  if (!["convert", "inspect", "thumbnail", "preview"].includes(data.type)) return;
 
   try {
     if (data.type === "thumbnail") {
       const glb = await decodeTripo(data.buffer, data.key);
       const { json, bin } = readGlb(glb);
       const thumbnail = await renderThumbnail(json, bin, 128);
+      event.source.postMessage({ id: data.id, ok: true, thumbnail }, event.origin);
+      return;
+    }
+    if (data.type === "preview") {
+      const glb = await decodeTripo(data.buffer, data.key);
+      const { json, bin } = readGlb(glb);
+      const thumbnail = await renderThumbnail(json, bin, 320, data.options || {});
       event.source.postMessage({ id: data.id, ok: true, thumbnail }, event.origin);
       return;
     }

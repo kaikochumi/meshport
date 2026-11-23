@@ -7,7 +7,7 @@
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-c9f75a?style=flat" alt="MIT license"></a>
   <a href="https://github.com/kaikochumi/meshport/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/kaikochumi/meshport/test.yml?branch=main&label=tests&color=c9f75a&style=flat" alt="Tests"></a>
-  <img src="https://img.shields.io/badge/version-0.5.0-111318?style=flat" alt="Version 0.5.0">
+  <img src="https://img.shields.io/badge/version-0.6.0-111318?style=flat" alt="Version 0.6.0">
 </p>
 
 Meshport is a browser extension that exports models from Tripo Studio and Meshy. It reads the library already loaded in your browser session: your whole Tripo library or the models in your Meshy workspace. Search the list, tick several models, and queue a batch as STL, OBJ, glTF, GLB, FBX, or a zip of textures. The conversion runs in your browser, it never calls a paid export API, and your models never leave it.
@@ -54,6 +54,13 @@ The source switch at the top of the popup chooses between Tripo and Meshy. Each 
 
 Both platforms share `Inspect`, which decodes the model without saving it and shows the triangle count, the texture list, and texture sizes.
 
+### Export presets, preview, and history
+
+- Choose an export preset to set the format and PNG conversion together. Meshport includes six presets for common workflows and lets you save up to 20 custom ones.
+- Select a model and click `Open preview` to rotate its 3D render. Drag to rotate, scroll to zoom, or use `Reset view` to return to the starting angle.
+- `Inspect` also shows compatibility warnings for the selected format, including missing textures, high triangle counts, and STL's loss of textures.
+- Open `Export history` from the clock icon to see recent completed downloads. The list keeps up to 100 entries with the model name, output format, file name, size, and date. Use `Clear history` to erase it.
+
 ## Install
 
 Meshport is not on the Chrome Web Store. Load it from the folder:
@@ -99,6 +106,8 @@ Keep the popup open while the queue runs. If it closes, the next open shows the 
 
 Meshport remembers your selected model, format, and settings between uses. The Settings tab sets a subfolder inside Downloads, switches the download to ask for a folder each time, and picks the default format. `Inspect` decodes the model without saving it and shows the triangle count, the texture list, and texture sizes.
 
+Export presets appear above the format picker. Choose a built-in preset or set a format and PNG preference, name the preset, and press `Save`. Select a custom preset to remove it with `Delete`. The preview and compatibility information work on the selected model. Downloads recorded in Export history stay on your device.
+
 ## Formats
 
 | Format | What you get |
@@ -127,6 +136,7 @@ Tripo signs model links and they expire after a few minutes, so Meshport starts 
 
 - Everything runs in the extension. Models and textures never leave the browser.
 - Meshport uses the Tripo and Meshy sessions already active in your browser and contacts only their hosts to read your library and download the files. It does not read your password or store a token.
+- Export history stores file metadata locally. It does not keep model files or signed download URLs. Large downloads and ZIP contents have safety limits to avoid exhausting browser memory.
 - Download only models you have the right to use.
 
 ## Troubleshooting
@@ -134,6 +144,8 @@ Tripo signs model links and they expire after a few minutes, so Meshport starts 
 **The wrong model downloads.** Reload Meshport on the extensions page, then reload the Tripo tab, and try again. If it still happens, right-click the Meshport icon, choose `Inspect popup`, open the Console tab, and look for the `[Meshport]` lines. They show exactly which link was chosen and why. `JSON.parse(localStorage["meshport/last-download"])` in that console replays the whole decision.
 
 **A download says the link expired.** The signed link ran out. Meshport refreshes it once automatically; open the model in Tripo and rescan if it keeps failing.
+
+**A file is too large to process.** Meshport enforces a 512 MB download and ZIP-entry limit. Try a smaller model or export the original file from the source platform.
 
 **The library is empty.** Reload the Tripo tab so the content script can read the session, then rescan.
 
@@ -152,9 +164,9 @@ npm install
 npm test
 ```
 
-The suite covers the GLB parser, texture extraction, OBJ and MTL output, the zip writer, the glTF package builder, the meshopt decode path, library card parsing, model file detection, the export queue state machine, and library search and sorting. It runs against `test/fixtures/cube-meshopt.glb`, a cube compressed with `gltfpack -cc`.
+The suite covers the GLB parser, texture extraction, OBJ and MTL output, the zip writer, the glTF package builder, the meshopt decode path, library card parsing, model file detection, the export queue state machine, library search and sorting, export presets, history, and compatibility checks. It runs against `test/fixtures/cube-meshopt.glb`, a cube compressed with `gltfpack -cc`.
 
-`npm run test:e2e` drives a real browser through both platforms: the Tripo library, the Meshy library scan against a direct list with no signed links, the round trip, a Meshy batch of models that were never opened, a linkless Meshy model kept out of the selection, and a queued Tripo batch with search, multi-select, sorting, queue persistence, and interrupted-item restore. It looks for Edge in the standard install location; set `MESHPORT_EDGE_PATH` when it lives elsewhere.
+`npm run test:e2e` drives a real browser through both platforms: the Tripo library, the Meshy library scan against a direct list with no signed links, the round trip, a Meshy batch of models that were never opened, a linkless Meshy model kept out of the selection, and a queued Tripo batch with search, multi-select, sorting, queue persistence, interrupted-item restore, and the new export controls. The browser test also runs on Windows in GitHub Actions. It looks for Edge in the standard install location; set `MESHPORT_EDGE_PATH` when it lives elsewhere.
 
 Rebuild the decoder bundle after upgrading glTF Transform or meshoptimizer:
 

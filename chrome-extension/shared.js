@@ -79,6 +79,7 @@ function tripoProjectCreatedAt(project) {
 }
 
 const FBX_MAGIC = "Kaydara FBX Binary  \u0000\u001a\u0000";
+const MESHPORT_MAX_FILE_BYTES = 512 * 1024 * 1024;
 
 function meshportModelKind(bytes) {
   if (!bytes || bytes.length < 4) return "unknown";
@@ -113,6 +114,9 @@ async function zipEntryBytes(bytes, view, entry) {
   if (entry.method !== 0 && entry.method !== 8) {
     throw new Error("Tripo sent a ZIP file with an unsupported compression.");
   }
+  if (entry.size > MESHPORT_MAX_FILE_BYTES || entry.compressed > MESHPORT_MAX_FILE_BYTES) {
+    throw new Error("The ZIP model exceeds Meshport's 512 MB safety limit.");
+  }
   const offset = entry.localOffset;
   if (offset + 30 > bytes.length || view.getUint32(offset, true) !== 0x04034b50) {
     throw new Error("Tripo sent a ZIP file with a broken entry.");
@@ -121,13 +125,43 @@ async function zipEntryBytes(bytes, view, entry) {
   const end = start + entry.compressed;
   if (end > bytes.length) throw new Error("Tripo sent a ZIP file that ends too early.");
   const data = bytes.subarray(start, end);
-  if (entry.method === 0) return new Uint8Array(data);
+  if (entry.method === 0) {
+    if (data.length !== entry.size) throw new Error("The ZIP entry has a mismatched size.");
+    return new Uint8Array(data);
+  }
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  const reader = stream.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MESHPORT_MAX_FILE_BYTES || size > entry.size) {
+        throw new Error("The ZIP entry expands beyond its declared size or safety limit.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  if (size !== entry.size) throw new Error("The ZIP entry has a mismatched size.");
+  const output = new Uint8Array(size);
+  let cursor = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, cursor);
+    cursor += chunk.byteLength;
+  }
+  return output;
 }
 
 async function meshportGlbFromZip(buffer) {
   const bytes = new Uint8Array(buffer);
+  if (bytes.length > MESHPORT_MAX_FILE_BYTES) {
+    throw new Error("The ZIP model exceeds Meshport's 512 MB safety limit.");
+  }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const end = zipEndOfCentralDirectory(view);
   if (end < 0) throw new Error("Tripo sent a ZIP file that could not be read.");
@@ -147,6 +181,9 @@ async function meshportGlbFromZip(buffer) {
       throw new Error("Tripo sent an encrypted ZIP file.");
     }
     const nameLength = view.getUint16(offset + 28, true);
+    const recordEnd = offset + 46 + nameLength + view.getUint16(offset + 30, true)
+      + view.getUint16(offset + 32, true);
+    if (recordEnd > end) throw new Error("Tripo sent a ZIP file with a broken index.");
     const name = new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
     entries.push({
       name,
@@ -155,7 +192,7 @@ async function meshportGlbFromZip(buffer) {
       size: view.getUint32(offset + 24, true),
       localOffset: view.getUint32(offset + 42, true),
     });
-    offset += 46 + nameLength + view.getUint16(offset + 30, true) + view.getUint16(offset + 32, true);
+    offset = recordEnd;
   }
 
   const model = entries

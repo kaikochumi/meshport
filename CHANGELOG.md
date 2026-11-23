@@ -2,6 +2,28 @@
 
 All notable changes to Meshport are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-11-23
+
+### Added
+
+- Six built-in export presets and up to 20 saved custom presets for format and PNG settings.
+- Export history with the last 100 completed downloads, stored as local metadata without signed URLs.
+- Rotatable 3D preview with drag, zoom, and reset controls.
+- Format compatibility checks during inspection, including texture and model-size warnings.
+- Progressive loading for larger Tripo and Meshy libraries.
+- Browser end-to-end tests on Windows in GitHub Actions and tests for export settings and history.
+
+### Changed
+
+- Downloads use bounded streaming with a 512 MB limit and a timeout. ZIP decoding checks declared sizes and rejects oversized entries.
+- Model URL capture and metadata handling enforce tighter validation and limits.
+- The export queue guards against duplicate work and makes retries more reliable.
+
+### Fixed
+
+- Tripo model capture requires matching model IDs to avoid exporting unrelated preview files.
+- Library paging handles repeated results without looping indefinitely.
+
 ## [0.5.0] - 2026-11-17
 
 ### Added
@@ -59,6 +81,7 @@ All notable changes to Meshport are documented here. The format follows [Keep a 
 - Content-verified downloads: every GLB is probed for the ids Tripo embeds inside the file, so a preview of another asset never wins.
 - Settings tab with a download subfolder, an ask-where-to-save switch, and a default format.
 
+[0.6.0]: https://github.com/kaikochumi/meshport/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/kaikochumi/meshport/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kaikochumi/meshport/releases/tag/v0.4.0
 [0.3.4]: https://github.com/kaikochumi/meshport/releases/tag/v0.3.4

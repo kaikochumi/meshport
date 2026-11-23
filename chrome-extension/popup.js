@@ -54,6 +54,21 @@ const queueCount = document.getElementById("queue-count");
 const queueResumeButton = document.getElementById("queue-resume");
 const queueClearButton = document.getElementById("queue-clear");
 const queueToolbar = document.querySelector(".queue-toolbar");
+const historyToggle = document.getElementById("view-history-toggle");
+const viewHistory = document.getElementById("view-history");
+const historyList = document.getElementById("history-list");
+const historyEmpty = document.getElementById("history-empty");
+const historyClear = document.getElementById("history-clear");
+const presetSelect = document.getElementById("preset-select");
+const presetName = document.getElementById("preset-name");
+const presetSave = document.getElementById("preset-save");
+const presetDelete = document.getElementById("preset-delete");
+const diagnosticsBox = document.getElementById("diagnostics-box");
+const diagnosticsList = document.getElementById("diagnostics-list");
+const previewOpen = document.getElementById("preview-open");
+const previewPanel = document.getElementById("preview-panel");
+const previewImage = document.getElementById("preview-image");
+const previewReset = document.getElementById("preview-reset");
 
 const FORMAT_LABELS = {
   stl: "Download STL",
@@ -119,14 +134,35 @@ let libraryQuery = "";
 let librarySort = "date";
 let batchNames = new Set();
 let queue = null;
+let lastStats = null;
+let previewEpoch = 0;
+let previewState = { angle: -0.62, elevation: 0.34, zoom: 1 };
+let previewRenderPending = false;
+let previewRenderScheduled = false;
+let previewNeedsBuffer = false;
 
 // Keeps the last download decisions so a wrong-model report can be traced.
 // Everything also goes to the popup console with a [Meshport] prefix.
 function logDownload(event, data = {}) {
   try {
-    const line = { at: Date.now(), event, ...data };
+    // Signed CDN URLs may contain temporary access credentials.
+    const redact = (value) => {
+      if (typeof value === "string") {
+        return value.replace(/https?:\/\/[^\s"'<>]+/gi, "[download link redacted]")
+          .replace(/(token|signature|authorization|api[_-]?key)=([^\s&,]+)/gi, "$1=[redacted]");
+      }
+      if (Array.isArray(value)) return value.slice(0, 30).map(redact);
+      if (value && typeof value === "object") {
+        return Object.fromEntries(Object.entries(value).slice(0, 40)
+          .map(([key, item]) => [key, /url|token|secret|signature|authorization|cookie|key/i.test(key)
+            ? "[redacted]" : redact(item)]));
+      }
+      return value;
+    };
+    const sanitized = redact(data);
+    const line = { at: Date.now(), event, ...sanitized };
     (window.__meshportLog ||= []).push(line);
-    console.log("[Meshport]", event, data);
+    console.log("[Meshport]", event, sanitized);
     localStorage.setItem("meshport/last-download", JSON.stringify(window.__meshportLog.slice(-80)));
   } catch {
     // Logging is best effort.
@@ -165,6 +201,41 @@ function noteDownloadSuccess() {
     showStarPrompt();
   }
   saveStarState(state);
+}
+
+function recordCompletedExport(entry, format, fileName, bytes) {
+  try {
+    MeshportExportTools.recordExport(localStorage, {
+      name: entryTitle(entry),
+      platform: entry.kind === "meshy" ? "meshy" : "tripo",
+      format,
+      fileName,
+      bytes,
+    });
+  } catch (error) {
+    console.warn("[Meshport] Could not save export history:", error.message);
+  }
+}
+
+function renderHistory() {
+  const items = MeshportExportTools.history(localStorage);
+  historyList.replaceChildren();
+  historyEmpty.hidden = items.length > 0;
+  historyClear.disabled = items.length === 0;
+  for (const item of items) {
+    const row = document.createElement("li");
+    row.className = "queue-item";
+    const name = document.createElement("strong");
+    name.className = "queue-name";
+    name.textContent = item.name || "Model";
+    const detail = document.createElement("span");
+    detail.className = "queue-detail";
+    const at = new Date(item.at);
+    detail.textContent = `${item.fileName} · ${(item.format || "").toUpperCase()} · ${formatBytes(item.bytes)} · ${
+      Number.isNaN(at.getTime()) ? "Unknown date" : at.toLocaleString()}`;
+    row.append(name, detail);
+    historyList.append(row);
+  }
 }
 
 function sandboxReady() {
@@ -615,18 +686,22 @@ function clearPreviewCache() {
 function showView(name) {
   const isSettings = name === "settings";
   const isQueue = name === "queue";
-  viewExport.hidden = isSettings || isQueue;
+  const isHistory = name === "history";
+  viewExport.hidden = isSettings || isQueue || isHistory;
   viewSettings.hidden = !isSettings;
   viewQueue.hidden = !isQueue;
+  viewHistory.hidden = !isHistory;
   viewToggle.title = isSettings ? "Back to export" : "Open settings";
   viewToggle.setAttribute("aria-label", viewToggle.title);
   document.body.classList.toggle("settings-open", isSettings);
   document.body.classList.toggle("queue-open", isQueue);
+  document.body.classList.toggle("history-open", isHistory);
   if (isSettings) {
     updatePathPreview();
     updatePreviewCount();
   }
   if (isQueue) renderQueue();
+  if (isHistory) renderHistory();
   document.querySelector("main").scrollTop = 0;
 }
 
@@ -855,9 +930,11 @@ async function openProjectAndCapture(projectId, stems = []) {
       }
 
       if (!stems.length) {
-        // Nothing is known about this project's file ids, so the first GLB
-        // the tab loads is the best guess available.
-        const firstOwn = [...own].sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0))[0];
+        // Without an operator id, only trust files explicitly bound to this
+        // project by the browser request observer or its document URL.
+        const firstOwn = own.filter((capture) => capture.projectId === projectId
+          || tripoProjectIdFromUrl(capture.doc || "") === projectId)
+          .sort((a, b) => (a.capturedAt || 0) - (b.capturedAt || 0))[0];
         if (firstOwn?.url) {
           logDownload("helper-first-glb", { url: firstOwn.url });
           return { url: firstOwn.url };
@@ -872,7 +949,9 @@ async function openProjectAndCapture(projectId, stems = []) {
           try {
             const glb = await fetchGlbFromUrl(capture.url);
             const content = glb ? glbContentIds(glb) : [];
-            if (glb && glbContentVerified(glb, stems)) {
+            // This fallback inspects otherwise unbound viewer captures. An
+            // unlabelled GLB could be another asset preloaded by the page.
+            if (glb && content.some((id) => stems.includes(id))) {
               logDownload("helper-content-match", { url: capture.url, content, stems });
               return { url: capture.url, glb };
             }
@@ -900,7 +979,7 @@ async function openProjectAndCapture(projectId, stems = []) {
   );
 }
 
-async function getLibraryFromTab() {
+async function getLibraryFromTab(onProgress = () => {}) {
   const cachedProjects = () => {
     const cached = readStoredJson(LIBRARY_KEY);
     return Array.isArray(cached?.projects) ? cached.projects : [];
@@ -908,12 +987,25 @@ async function getLibraryFromTab() {
 
   const tab = await getTripoTab();
   let response;
+  const requestId = crypto.randomUUID();
+  const projectsById = new Map();
+  const receiveProgress = (message, sender) => {
+    if (message?.type !== "meshport-library-progress" || message.requestId !== requestId
+      || sender?.tab?.id !== tab.id || !Array.isArray(message.projects)) return;
+    for (const project of message.projects) {
+      if (typeof project?.id === "string") projectsById.set(project.id, project);
+    }
+    onProgress([...projectsById.values()], message.info || {});
+  };
+  chrome.runtime.onMessage.addListener(receiveProgress);
   try {
-    response = await chrome.tabs.sendMessage(tab.id, { type: "get-tripo-library" });
+    response = await chrome.tabs.sendMessage(tab.id, { type: "get-tripo-library", requestId });
   } catch {
     const projects = cachedProjects();
     if (projects.length) return { projects, cached: true };
     throw new Error("Reload the Tripo tab so Meshport can read the library.");
+  } finally {
+    chrome.runtime.onMessage.removeListener(receiveProgress);
   }
   if (!response?.ok) {
     const projects = cachedProjects();
@@ -1088,9 +1180,18 @@ function selectEntry(entry, focus = false) {
   baseNameInput.value = baseNameFromEntry(entry);
   if (changed) {
     inspectedKey = "";
+    lastStats = null;
     lastPreviews = [];
     clearTextures();
+    previewEpoch += 1;
+    previewPanel.hidden = true;
+    previewOpen.textContent = "Open preview";
+    previewImage.removeAttribute("src");
+    previewState = { angle: -0.62, elevation: 0.34, zoom: 1 };
+    previewRenderScheduled = false;
+    previewNeedsBuffer = false;
   }
+  renderDiagnostics();
   updateActionState();
 }
 
@@ -1359,21 +1460,54 @@ function primeThumbnails(entries, cards) {
 function downloadBlob(blob, filename) {
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(blob);
-    const timer = setTimeout(() => {
+    let downloadId = null;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
       URL.revokeObjectURL(objectUrl);
-      reject(new Error("The download did not start. Try again."));
-    }, 30000);
+      if (error) reject(error);
+      else resolve(downloadId);
+    };
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      if (delta.state?.current === "complete") finish();
+      if (delta.state?.current === "interrupted") {
+        finish(new Error(`Download interrupted: ${delta.error?.current || "browser error"}.`));
+      }
+    };
+    const timer = setTimeout(() => {
+      finish(new Error("The browser did not finish the download within 10 minutes."));
+    }, 10 * 60 * 1000);
+    chrome.downloads.onChanged.addListener(onChanged);
     chrome.downloads.download({
       url: objectUrl,
       filename: downloadPath(filename),
       conflictAction: "uniquify",
       saveAs: Boolean(settings.askSave),
-    }, (downloadId) => {
-      clearTimeout(timer);
+    }, (startedId) => {
       const error = chrome.runtime.lastError;
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
-      if (error) reject(new Error(error.message));
-      else resolve(downloadId);
+      if (error || !Number.isInteger(startedId)) {
+        finish(new Error(error?.message || "The browser did not accept the download."));
+        return;
+      }
+      downloadId = startedId;
+      // onChanged can fire before this callback for very small downloads.
+      // This lookup also handles downloads that completed before the listener was ready.
+      chrome.downloads.search({ id: downloadId }, (matches) => {
+        const queryError = chrome.runtime.lastError;
+        if (queryError) {
+          finish(new Error(queryError.message));
+          return;
+        }
+        const state = matches?.[0]?.state;
+        if (state === "complete") finish();
+        if (state === "interrupted") {
+          finish(new Error(`Download interrupted: ${matches[0].error || "browser error"}.`));
+        }
+      });
     });
   });
 }
@@ -1406,19 +1540,51 @@ async function askSandbox({ type, key, buffer, format, options, baseName }, time
 }
 
 async function fetchArrayBuffer(url, owner = "Tripo") {
+  if (typeof url !== "string" || !/^https:\/\//i.test(url)) {
+    throw new Error("Invalid download link. Expected an HTTPS URL.");
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
   let response;
   try {
-    response = await fetch(url, { credentials: "omit", redirect: "follow" });
+    response = await fetch(url, { credentials: "omit", redirect: "follow", signal: controller.signal });
+    if (response.status === 403) throw new Error(`The ${owner} download link expired.`);
+    if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    const declared = Number(response.headers.get("content-length"));
+    if (declared > MESHPORT_MAX_FILE_BYTES) throw new Error("Model exceeds the 512 MB safety limit.");
+    if (!response.body) {
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MESHPORT_MAX_FILE_BYTES) throw new Error("Model exceeds the 512 MB safety limit.");
+      return buffer;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MESHPORT_MAX_FILE_BYTES) throw new Error("Model exceeds the 512 MB safety limit.");
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    const output = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return output.buffer;
   } catch (error) {
+    if (error.name === "AbortError") throw new Error("Download timed out after 2 minutes.");
     throw new Error(`Download failed: ${error.message}. Reload the model page and try again.`);
+  } finally {
+    clearTimeout(timeout);
   }
-  if (response.status === 403) {
-    throw new Error(`The ${owner} download link expired.`);
-  }
-  if (!response.ok) {
-    throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-  }
-  return response.arrayBuffer();
 }
 
 function isExpiredLinkError(error) {
@@ -1656,12 +1822,12 @@ async function fetchNativeModel(entry) {
   };
 }
 
-async function runSandboxJob(request, fallbackUrl) {
+async function runSandboxJob(request, fallbackUrl, entry = null) {
   try {
     return await askSandbox(request);
   } catch (error) {
-    if (!request.buffer && fallbackUrl && /Decode the file first/i.test(error.message)) {
-      request.buffer = await fetchArrayBuffer(fallbackUrl);
+    if (!request.buffer && /Decode the file first/i.test(error.message) && (entry || fallbackUrl)) {
+      request.buffer = entry ? await fetchEntryBuffer(entry) : await fetchArrayBuffer(fallbackUrl);
       return askSandbox(request);
     }
     throw error;
@@ -1677,7 +1843,7 @@ function convertEntry(entry, key, format, buffer, baseName) {
     format,
     options: { png, baseName },
     baseName,
-  }, entry?.url || "");
+  }, entry?.url || "", entry);
 }
 
 function convertSelected(key, format, buffer, baseName) {
@@ -1697,6 +1863,85 @@ function describeStats(stats) {
   if (stats.triangles) parts.push(`${stats.triangles.toLocaleString()} triangles`);
   if (stats.textures?.length) parts.push(`${stats.textures.length} texture(s)`);
   return parts.join(" · ");
+}
+
+function renderDiagnostics() {
+  diagnosticsList.replaceChildren();
+  diagnosticsBox.hidden = !selectedEntry;
+  if (!selectedEntry) return;
+  const { warnings, errors } = MeshportExportTools.diagnostics(
+    currentFormat(), selectedEntry.kind === "meshy" ? "meshy" : "tripo", lastStats,
+  );
+  const items = [
+    ...errors.map((text) => ({ text, level: "error" })),
+    ...warnings.map((text) => ({ text, level: "warning" })),
+  ];
+  if (!lastStats && currentFormat() !== "fbx") {
+    items.push({ text: "Inspect the model to check its geometry and textures.", level: "info" });
+  }
+  if (!items.length) items.push({ text: "No compatibility problems detected.", level: "ok" });
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.dataset.level = item.level;
+    li.textContent = item.text;
+    diagnosticsList.append(li);
+  }
+}
+
+/** Validate decoded geometry before any conversion or file download. */
+function assertCompatible(format, entry, stats) {
+  const { errors } = MeshportExportTools.diagnostics(
+    format, entry.kind === "meshy" ? "meshy" : "tripo", stats,
+  );
+  if (errors.length) throw new Error(errors.join(" "));
+}
+
+async function inspectModel(entry, key, buffer) {
+  return runSandboxJob({
+    type: "inspect", key, buffer, baseName: baseNameFromEntry(entry),
+  }, entry.url || "", entry);
+}
+
+async function renderInteractivePreview(first = false) {
+  if (!selectedEntry || previewPanel.hidden) return;
+  if (previewRenderPending) {
+    previewRenderScheduled = true;
+    previewNeedsBuffer ||= first;
+    return;
+  }
+  previewRenderPending = true;
+  const epoch = previewEpoch;
+  const key = selectionKey;
+  const entry = selectedEntry;
+  try {
+    const buffer = first ? await fetchEntryBuffer(entry) : null;
+    if (epoch !== previewEpoch || previewPanel.hidden) return;
+    const response = await runSandboxJob({
+      type: "preview", key, buffer, options: { ...previewState },
+    }, entry.url || "", entry);
+    if (epoch === previewEpoch && selectionKey === key && !previewPanel.hidden) {
+      previewImage.src = response.thumbnail;
+    }
+  } catch (error) {
+    if (epoch === previewEpoch && !previewPanel.hidden) setStatus(`Preview: ${error.message}`, "error");
+  } finally {
+    previewRenderPending = false;
+    if (previewRenderScheduled && !previewPanel.hidden) {
+      const reload = previewNeedsBuffer;
+      previewRenderScheduled = false;
+      previewNeedsBuffer = false;
+      void renderInteractivePreview(reload);
+    }
+  }
+}
+
+function scheduleInteractivePreview() {
+  if (previewPanel.hidden) return;
+  if (previewRenderPending) {
+    previewRenderScheduled = true;
+    return;
+  }
+  renderInteractivePreview();
 }
 
 function clearTextures() {
@@ -1941,13 +2186,29 @@ async function scan() {
   if (platform === "meshy") return scanMeshy();
   const runId = ++scanRunId;
   scanButton.classList.add("spinning");
+  let progressRenderTimer = 0;
+  let latestProgress = null;
+  const paintProgress = () => {
+    progressRenderTimer = 0;
+    if (runId !== scanRunId || platform !== "tripo" || !latestProgress) return;
+    const { projects, info } = latestProgress;
+    fillLinks(buildEntries([], projects));
+    entriesByPlatform.tripo = currentModelEntries.slice();
+    setStatus(`Reading Tripo library... ${info.loaded || projects.length} models loaded`, "busy");
+  };
   try {
     setScanning(true, "Reading your Tripo library...");
     const [linksResult, libraryResult] = await Promise.allSettled([
       getLinksFromActiveTab(),
-      getLibraryFromTab(),
+      getLibraryFromTab((projects, info) => {
+        if (runId !== scanRunId || platform !== "tripo") return;
+        latestProgress = { projects, info };
+        if (!progressRenderTimer) progressRenderTimer = setTimeout(paintProgress, 240);
+      }),
       refreshCapturedModels(),
     ]);
+    clearTimeout(progressRenderTimer);
+    progressRenderTimer = 0;
     // A platform switch starts a new scan; this one is stale now.
     if (runId !== scanRunId) return;
     const links = linksResult.status === "fulfilled" ? linksResult.value : [];
@@ -1995,6 +2256,7 @@ async function scan() {
     if (runId !== scanRunId) return;
     setStatus(`Scan error: ${error.message}`, "error");
   } finally {
+    clearTimeout(progressRenderTimer);
     if (runId === scanRunId) {
       scanButton.classList.remove("spinning");
       setScanning(false);
@@ -2028,16 +2290,115 @@ function setFormat(value) {
   const chip = defaultFormatInputs.find((entry) => entry.value === value);
   if (chip) chip.checked = true;
   updateFormatUi();
+  renderDiagnostics();
   savePreferences();
 }
 
 formatInputs.forEach((input) => {
-  input.addEventListener("change", () => setFormat(input.value));
+  input.addEventListener("change", () => {
+    setFormat(input.value);
+    presetSelect.value = "";
+    presetDelete.hidden = true;
+  });
 });
 
 defaultFormatInputs.forEach((input) => {
   input.addEventListener("change", () => setFormat(input.value));
 });
+
+function populatePresets(selectedId = "") {
+  presetSelect.replaceChildren(new Option("Choose a preset", ""));
+  for (const preset of MeshportExportTools.presets(localStorage)) {
+    presetSelect.add(new Option(preset.name, preset.id));
+  }
+  presetSelect.value = selectedId;
+  presetDelete.hidden = !selectedId.startsWith("user-");
+}
+
+presetSelect.addEventListener("change", () => {
+  const preset = MeshportExportTools.presets(localStorage)
+    .find((item) => item.id === presetSelect.value);
+  if (preset) {
+    setFormat(preset.format);
+    pngCheckbox.checked = preset.png;
+    savePreferences();
+  }
+  presetDelete.hidden = !preset?.id.startsWith("user-");
+});
+
+presetSave.addEventListener("click", () => {
+  try {
+    const preset = MeshportExportTools.savePreset(
+      localStorage, presetName.value, currentFormat(), pngCheckbox.checked,
+    );
+    presetName.value = "";
+    populatePresets(preset.id);
+    setStatus(`Preset "${preset.name}" saved.`, "ok");
+  } catch (error) {
+    setStatus(error.message, "error");
+  }
+});
+
+presetDelete.addEventListener("click", () => {
+  if (MeshportExportTools.removePreset(localStorage, presetSelect.value)) {
+    populatePresets();
+    setStatus("Custom preset deleted.", "ok");
+  }
+});
+
+historyToggle.addEventListener("click", () => {
+  showView(viewHistory.hidden ? "history" : "export");
+});
+historyClear.addEventListener("click", () => {
+  MeshportExportTools.clearHistory(localStorage);
+  renderHistory();
+});
+
+previewOpen.addEventListener("click", () => {
+  if (!selectedEntry) {
+    setStatus("Select a model first.", "error");
+    return;
+  }
+  previewPanel.hidden = !previewPanel.hidden;
+  previewOpen.textContent = previewPanel.hidden ? "Open preview" : "Close preview";
+  if (!previewPanel.hidden) {
+    previewEpoch += 1;
+    renderInteractivePreview(true);
+  } else {
+    previewEpoch += 1;
+    previewRenderScheduled = false;
+    previewNeedsBuffer = false;
+  }
+});
+
+previewReset.addEventListener("click", () => {
+  previewState = { angle: -0.62, elevation: 0.34, zoom: 1 };
+  scheduleInteractivePreview();
+});
+
+let previewDrag = null;
+previewImage.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  previewDrag = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+  previewImage.setPointerCapture(event.pointerId);
+});
+previewImage.addEventListener("pointermove", (event) => {
+  if (!previewDrag || event.pointerId !== previewDrag.pointerId) return;
+  previewState.angle += (event.clientX - previewDrag.x) * 0.012;
+  previewState.elevation = Math.max(-1.45, Math.min(1.45,
+    previewState.elevation + (event.clientY - previewDrag.y) * 0.01));
+  previewDrag.x = event.clientX;
+  previewDrag.y = event.clientY;
+  scheduleInteractivePreview();
+});
+previewImage.addEventListener("pointerup", () => { previewDrag = null; });
+previewImage.addEventListener("pointercancel", () => { previewDrag = null; });
+previewImage.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  previewState.zoom = Math.max(0.45, Math.min(3,
+    previewState.zoom * (event.deltaY > 0 ? 0.9 : 1.1)));
+  scheduleInteractivePreview();
+}, { passive: false });
 
 viewToggle.addEventListener("click", () => {
   showView(viewSettings.hidden ? "settings" : "export");
@@ -2091,7 +2452,10 @@ resetSettingsButton.addEventListener("click", () => {
   syncSettingsUi();
 });
 
-pngCheckbox.addEventListener("change", savePreferences);
+pngCheckbox.addEventListener("change", () => {
+  savePreferences();
+  presetSelect.value = "";
+});
 
 textureBox.addEventListener("toggle", () => {
   if (textureBox.open) textureBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -2212,6 +2576,7 @@ async function runQueueItem(item, { setDetail }) {
   if (!entry) throw new Error("This entry lost its model. Rescan and queue it again.");
 
   if (format === "fbx") {
+    assertCompatible(format, entry, null);
     if (entry.kind === "meshy") {
       throw new Error("FBX is Tripo-only. Meshport reads only the GLB from Meshy.");
     }
@@ -2226,6 +2591,7 @@ async function runQueueItem(item, { setDetail }) {
     setDetail(FORMAT_SAVE.fbx || "Saving FBX...");
     await downloadBlob(new Blob([native.bytes], { type: mimeType }), fileName);
     item.savedAs = fileName;
+    recordCompletedExport(entry, format, fileName, native.bytes.byteLength);
     noteDownloadSuccess();
     return;
   }
@@ -2234,12 +2600,15 @@ async function runQueueItem(item, { setDetail }) {
   // A batch never walks the user's Tripo tab through models one by one.
   const buffer = await fetchEntryBuffer(entry, { allowTabNavigation: false });
   const baseName = queuedBaseName(item);
+  const inspected = await inspectModel(entry, entryKey(entry), buffer);
+  assertCompatible(format, entry, inspected.stats);
   setDetail(FORMAT_PROGRESS[format] || "Converting...");
-  const response = await convertEntry(entry, entryKey(entry), format, buffer, baseName);
+  const response = await convertEntry(entry, entryKey(entry), format, null, baseName);
   const { result } = response;
   item.savedAs = result.fileName;
   setDetail(FORMAT_SAVE[format] || "Saving file...");
   await downloadBlob(new Blob([result.bytes], { type: result.mimeType }), result.fileName);
+  recordCompletedExport(entry, format, result.fileName, result.bytes.byteLength);
   noteDownloadSuccess();
 }
 
@@ -2457,15 +2826,12 @@ inspectButton.addEventListener("click", async () => {
   const key = selectionKey;
   try {
     setBusy(true, inspectedKey === key ? "Reading textures..." : "Downloading the GLB...");
-    const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
+    const buffer = await fetchSelectedBuffer();
     setBusy(true, "Decoding meshopt...");
-    const response = await runSandboxJob({
-      type: "inspect",
-      key,
-      buffer,
-      baseName: currentBaseName(entry),
-    }, entry.url || "");
+    const response = await inspectModel(entry, key, buffer);
     inspectedKey = key;
+    lastStats = response.stats;
+    renderDiagnostics();
     lastPreviews = response.previews || [];
     renderTextures(response.stats, lastPreviews);
     const summary = describeStats(response.stats);
@@ -2495,6 +2861,7 @@ convertButton.addEventListener("click", async () => {
       return;
     }
     if (format === "fbx") {
+      assertCompatible(format, entry, null);
       setBusy(true, "Reading the project file...");
       const native = await fetchNativeModel(entry);
       const mimeType = native.ext === "zip"
@@ -2506,20 +2873,28 @@ convertButton.addEventListener("click", async () => {
       setBusy(true, FORMAT_SAVE.fbx);
       await downloadBlob(new Blob([native.bytes], { type: mimeType }), fileName);
       logDownload("chosen-native", { ext: native.ext });
+      recordCompletedExport(entry, format, fileName, native.bytes.byteLength);
       noteDownloadSuccess();
       setStatus(`${fileName} saved${native.note ? ` · ${native.note}` : ""}.`, "ok");
       return;
     }
 
     setBusy(true, inspectedKey === key ? "Building output..." : "Downloading the GLB...");
-    const buffer = inspectedKey === key ? null : await fetchSelectedBuffer();
+    const buffer = await fetchSelectedBuffer();
+    setBusy(true, "Checking model compatibility...");
+    const inspected = await inspectModel(entry, key, buffer);
+    lastStats = inspected.stats;
+    lastPreviews = inspected.previews || [];
+    renderDiagnostics();
+    assertCompatible(format, entry, inspected.stats);
     setBusy(true, FORMAT_PROGRESS[format] || "Converting...");
-    const response = await convertSelected(key, format, buffer, currentBaseName(entry));
+    const response = await convertSelected(key, format, null, currentBaseName(entry));
     inspectedKey = key;
 
     const { result } = response;
     setBusy(true, FORMAT_SAVE[format] || "Saving file...");
     await downloadBlob(new Blob([result.bytes], { type: result.mimeType }), result.fileName);
+    recordCompletedExport(entry, format, result.fileName, result.bytes.byteLength);
     noteDownloadSuccess();
 
     if (textureBox.hidden) renderTextures(response.stats, lastPreviews);
@@ -2537,6 +2912,7 @@ convertButton.addEventListener("click", async () => {
 });
 
 const preferences = loadPreferences();
+populatePresets();
 setFormat(preferences.format || "stl");
 if (typeof preferences.png === "boolean") pngCheckbox.checked = preferences.png;
 syncSettingsUi();

@@ -19,6 +19,12 @@
           </div>
         </div>
         <div class="top-actions">
+          <button id="view-history-toggle" class="icon-button" type="button" title="Export history" aria-label="Export history">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
           <button id="scan" class="icon-button" type="button" title="Rescan your library" aria-label="Rescan your library">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M20 11a8 8 0 1 0-.7 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -85,6 +91,16 @@
           <label for="base-name">File name</label>
           <input id="base-name" type="text" placeholder="model" autocomplete="off" spellcheck="false">
         </div>
+
+        <section class="export-tools">
+          <div class="section-head"><h2>Export preset</h2></div>
+          <div class="preset-controls">
+            <select id="preset-select" aria-label="Export preset"><option value="">Choose a preset</option></select>
+            <input id="preset-name" type="text" placeholder="New preset name" aria-label="New preset name" maxlength="48" spellcheck="false">
+            <button id="preset-save" class="ghost" type="button" title="Save current settings as preset">Save</button>
+            <button id="preset-delete" class="link-button" type="button" title="Delete custom preset" hidden>Delete</button>
+          </div>
+        </section>
 
         <section>
           <div class="section-head">
@@ -154,6 +170,21 @@
           </summary>
           <ul id="texture-list"></ul>
         </details>
+
+        <section id="diagnostics-box" class="export-tools" hidden>
+          <div class="section-head"><h2>Compatibility</h2></div>
+          <ul id="diagnostics-list" class="diagnostics-list"></ul>
+        </section>
+
+        <section class="export-tools">
+          <div class="section-head"><h2>3D preview</h2></div>
+          <p class="tool-hint">Drag to rotate. Scroll to zoom.</p>
+          <button id="preview-open" class="ghost" type="button">Open preview</button>
+          <div id="preview-panel" class="preview-panel" hidden>
+            <img id="preview-image" alt="Rotatable render of the selected 3D model" draggable="false">
+            <button id="preview-reset" class="link-button" type="button">Reset view</button>
+          </div>
+        </section>
 
         <section id="star-box" class="star-box" hidden>
           <div class="star-text">
@@ -226,7 +257,7 @@
           <div class="about-brand">
             <img class="about-mark" src="icons/m-mark.png" alt="" width="44" height="44">
             <div class="about-text">
-              <p class="about-name">Meshport <span id="version">0.5.0</span></p>
+              <p class="about-name">Meshport <span id="version">0.6.0</span></p>
               <p class="about-by">Built by <a href="https://github.com/kaikochumi" target="_blank" rel="noreferrer">@kaikochumi</a></p>
             </div>
           </div>
@@ -254,12 +285,24 @@
         </section>
         <p class="queue-note">The queue exports one model at a time. Keep the popup open while it runs.</p>
       </div>
+
+      <div id="view-history" class="view" hidden>
+        <section class="queue-panel">
+          <div class="section-head">
+            <h2>Export history</h2>
+            <button id="history-clear" class="link-button" type="button">Clear history</button>
+          </div>
+          <ul id="history-list" class="queue" aria-label="Completed downloads"></ul>
+          <p id="history-empty" class="empty">Completed downloads will appear here.</p>
+        </section>
+      </div>
     </main>
 
     <iframe id="sandbox" src="sandbox.html" hidden></iframe>
     <script src="shared.js"></script>
     <script src="library-filter.js"></script>
     <script src="export-queue.js"></script>
+    <script src="export-tools.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

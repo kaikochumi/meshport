@@ -4,15 +4,22 @@
 // selection, sorting and persisted queue state.
 import puppeteer from "puppeteer-core";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const EXT = fileURLToPath(new URL("../chrome-extension/", import.meta.url));
 const FIXTURE_GLB = readFileSync(new URL("../test/fixtures/cube-meshopt.glb", import.meta.url));
-const EDGE = process.env.MESHPORT_EDGE_PATH
-  || "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+const EDGE = process.env.MESHPORT_EDGE_PATH || [
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+  "/usr/bin/microsoft-edge",
+  "/usr/bin/microsoft-edge-stable",
+].find((candidate) => existsSync(candidate));
+if (!EDGE || !existsSync(EDGE)) {
+  throw new Error("Microsoft Edge was not found. Set MESHPORT_EDGE_PATH to its executable path.");
+}
 // Optional visual audit: MESHPORT_SHOTS=<folder> saves one full-page capture
 // per UI state the test reaches.
 const SHOT_DIR = process.env.MESHPORT_SHOTS || "";
@@ -357,6 +364,67 @@ const pickedName = await page.evaluate(() => document.getElementById("base-name"
 if (!pickedName) problems.push("picked model did not set the file name");
 await shot("02-tripo-selected");
 
+// Export presets persist the chosen format and texture conversion settings.
+await page.select("#preset-select", "blender");
+const blenderSettings = await page.evaluate(() => ({
+  format: document.querySelector('input[name="format"]:checked')?.value,
+  png: document.getElementById("png").checked,
+}));
+if (blenderSettings.format !== "obj" || !blenderSettings.png) {
+  problems.push(`blender preset ${JSON.stringify(blenderSettings)}`);
+}
+await page.select("#preset-select", "web");
+await page.type("#preset-name", "Browser review");
+await page.click("#preset-save");
+const savedPreset = await page.evaluate(() => ({
+  selected: document.getElementById("preset-select").value,
+  stored: JSON.parse(localStorage.getItem("meshport/export-presets/v1") || "[]"),
+}));
+if (!savedPreset.selected.startsWith("user-")
+  || savedPreset.stored.length !== 1
+  || savedPreset.stored[0].format !== "glb") {
+  problems.push(`custom preset ${JSON.stringify(savedPreset)}`);
+}
+
+// Preview rendering is done in the sandbox, and the first model must be
+// available for rotation, zoom and reset without a conversion.
+await page.click("#preview-open");
+await page.waitForFunction(() => {
+  const image = document.getElementById("preview-image");
+  return !document.getElementById("preview-panel").hidden
+    && image.src.startsWith("data:image/png;") && image.naturalWidth > 0;
+}, { timeout: 45000 });
+await page.$eval("#preview-image", (image) => image.scrollIntoView({ block: "center" }));
+const originalPreview = await page.$eval("#preview-image", (image) => image.src);
+const bounds = await page.$eval("#preview-image", (image) => {
+  const rect = image.getBoundingClientRect();
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+});
+await page.mouse.move(bounds.x, bounds.y);
+await page.mouse.down();
+await page.mouse.move(bounds.x + 85, bounds.y + 12, { steps: 6 });
+await page.mouse.up();
+await page.waitForFunction((original) =>
+  document.getElementById("preview-image").src !== original,
+{ timeout: 45000 }, originalPreview);
+await page.$eval("#preview-image", (image) =>
+  image.dispatchEvent(new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true })));
+await page.waitForFunction((old) =>
+  document.getElementById("preview-image").src !== old,
+{ timeout: 45000 }, originalPreview);
+await page.click("#preview-reset");
+await page.waitForFunction((original) =>
+  document.getElementById("preview-image").src === original,
+{ timeout: 45000 }, originalPreview);
+await page.click("#preview-open");
+if (!(await page.evaluate(() => document.getElementById("preview-panel").hidden))) {
+  problems.push("preview did not close");
+}
+await shot("02b-preview");
+
+// Restore the original format for the existing STL batch assertions.
+await page.select("#preset-select", "print");
+
 // Switching to Meshy lists the whole library, not just the open model: two
 // cards with real names, triangle counts, and the theme melts to violet.
 await page.click("#platform-meshy");
@@ -683,7 +751,24 @@ if (queueWidth.scroll > queueWidth.body) {
 }
 await shot("06-queue-done");
 
-await page.click("#view-queue-toggle");
+await page.click("#view-history-toggle");
+await page.waitForFunction(() => !document.getElementById("view-history").hidden);
+const completedHistory = await page.evaluate(() => ({
+  count: document.querySelectorAll("#history-list li").length,
+  names: document.getElementById("history-list").textContent,
+  stored: JSON.parse(localStorage.getItem("meshport/export-history/v1") || "[]"),
+}));
+if (completedHistory.count !== 4) {
+  problems.push(`history count ${completedHistory.count}`);
+}
+if (completedHistory.stored.length !== 4
+  || !completedHistory.names.includes("Avocado")
+  || !completedHistory.names.includes("Street Van")) {
+  problems.push(`history items ${JSON.stringify(completedHistory)}`);
+}
+await shot("06b-history");
+await page.click("#view-history-toggle");
+
 await page.waitForFunction(() => !document.getElementById("view-export").hidden, { timeout: 5000 });
 selectionState = await page.evaluate(() => ({
   picked: document.querySelectorAll(".model-row.picked").length,
@@ -698,6 +783,26 @@ if (selectionState.button !== "Export 2") problems.push(`export button after que
 // finished batch instead of pretending it never happened.
 await page.reload({ waitUntil: "load" });
 await waitCards();
+const afterReload = await page.evaluate(() => ({
+  custom: [...document.getElementById("preset-select").options]
+    .filter((item) => item.value.startsWith("user-")).map((item) => item.textContent),
+  history: JSON.parse(localStorage.getItem("meshport/export-history/v1") || "[]").length,
+}));
+if (afterReload.custom.join("|") !== "Browser review") {
+  problems.push(`custom preset lost after reload: ${afterReload.custom}`);
+}
+if (afterReload.history !== 4) problems.push(`export history lost after reload: ${afterReload.history}`);
+await page.select("#preset-select", savedPreset.selected);
+await page.click("#preset-delete");
+if (await page.evaluate(() => JSON.parse(localStorage.getItem("meshport/export-presets/v1") || "[]").length)) {
+  problems.push("custom preset deletion did not persist");
+}
+await page.click("#view-history-toggle");
+await page.click("#history-clear");
+if (await page.evaluate(() => document.querySelectorAll("#history-list li").length)) {
+  problems.push("export history did not clear");
+}
+await page.click("#view-history-toggle");
 await page.waitForFunction(
   () => document.querySelectorAll("#queue-list .queue-item[data-status='completed']").length === 2,
   { timeout: 15000 },

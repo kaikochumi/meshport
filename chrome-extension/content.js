@@ -4,7 +4,7 @@ const liveUrls = new Set();
 const STUDIO_API = "https://api.tripo3d.ai";
 const LIBRARY_SCOPES = ["mine", "collected"];
 const LIBRARY_PAGE_SIZE = 20;
-const LIBRARY_MAX_MODELS = 120;
+const LIBRARY_MAX_PAGES = 200;
 
 function meshportDeviceId() {
   const key = "meshport/device-id";
@@ -82,24 +82,32 @@ async function studioApi(path, { method = "GET", body, timeout = 15000, step = "
   }
 }
 
-async function fetchLibraryProjects() {
+async function fetchLibraryProjects(onProgress = () => {}) {
   const byId = new Map();
   for (const scope of LIBRARY_SCOPES) {
     try {
       let offset = 0;
-      for (let page = 0; page < 6 && byId.size < LIBRARY_MAX_MODELS; page++) {
+      let previousPage = "";
+      for (let page = 0; page < LIBRARY_MAX_PAGES; page++) {
         const data = await studioApi(
           `/v2/studio/assets/v2?asset_type=${scope}&offset=${offset}&size=${LIBRARY_PAGE_SIZE}&type=all`,
         );
         const batch = Array.isArray(data?.projects) ? data.projects : [];
+        const pageKey = batch.map((project) => String(project?.id || "")).join("|");
+        if (pageKey && pageKey === previousPage) break;
+        previousPage = pageKey;
+        const added = [];
         for (const project of batch) {
           const card = tripoLibraryProject(project, scope);
           if (!card || byId.has(card.id)) continue;
           byId.set(card.id, card);
+          added.push(card);
         }
         offset += batch.length;
+        if (added.length) onProgress(added, { scope, loaded: byId.size });
         const total = Number(data?.total);
-        if (!batch.length || (Number.isFinite(total) && offset >= total)) break;
+        if (!batch.length || batch.length < LIBRARY_PAGE_SIZE
+          || (Number.isFinite(total) && total > 0 && offset >= total)) break;
       }
     } catch (error) {
       if (scope === "mine") throw error;
@@ -256,9 +264,10 @@ window.addEventListener("message", (event) => {
   const data = event.data;
   if (!data || data.source !== "meshport") return;
   if (data.type !== "model-url" && data.type !== "model-request") return;
-  if (typeof data.url !== "string") return;
+  if (typeof data.url !== "string" || data.url.length > 4096) return;
   const url = data.url.split("#")[0];
   if (!isTripoGlbUrl(url)) return;
+  if (liveUrls.size >= 2000) liveUrls.clear();
   liveUrls.add(url);
   report([url], data.type === "model-request");
 });
@@ -272,7 +281,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "get-tripo-library") {
-    fetchLibraryProjects()
+    const requestId = typeof message.requestId === "string" ? message.requestId.slice(0, 64) : "";
+    fetchLibraryProjects((projects, info) => {
+      if (!requestId) return;
+      chrome.runtime.sendMessage({
+        type: "meshport-library-progress", requestId, projects, info,
+      }).catch(() => {});
+    })
       .then((projects) => sendResponse({ ok: true, projects }))
       .catch((error) => sendResponse({ ok: false, error: error.message, projects: [] }));
     return true;
@@ -294,6 +309,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // stays as a fallback, stamped with the device id the app itself sends.
 const MESHY_HOST = /(^|\.)meshy\.ai$/i.test(location.hostname);
 const MESHY_TASK_RE = /meshyd-api\/web\/v\d\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const MESHY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MESHY_TASKS_QUERY = "?excludeWorkspace=true&pageNum=1&pageSize=50"
   + "&phases=draft&phases=generate&phases=texture&phases=image-to-3d-texture&phases=stylize"
   + "&phases=animate&phases=auto-uv&phases=part-segmentation&phases=model-edit&phases=relief"
@@ -324,19 +340,33 @@ window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data;
   if (data?.source !== "meshport" || data.type !== "meshy-capture") return;
-  if (data.status?.id && data.status.modelUrl) {
-    meshyStatusByTask.set(data.status.id, data.status);
+  const acceptedStatus = (value) => {
+    if (!value || !MESHY_ID_RE.test(value.id || "")) return null;
+    const modelUrl = meshyAssetUrl(value.modelUrl);
+    return modelUrl ? {
+      id: value.id.toLowerCase(), modelUrl,
+      previewUrl: safeMeshyPreview(value.previewUrl),
+    } : null;
+  };
+  const status = acceptedStatus(data.status);
+  if (status) {
+    meshyStatusByTask.set(status.id, status);
   }
   if (Array.isArray(data.statuses)) {
-    for (const status of data.statuses) {
-      if (status?.id && status.modelUrl) meshyStatusByTask.set(status.id, status);
+    for (const raw of data.statuses.slice(0, 200)) {
+      const valid = acceptedStatus(raw);
+      if (valid) meshyStatusByTask.set(valid.id, valid);
     }
   }
   if (Array.isArray(data.list) && data.list.length) {
     const merged = new Map(meshyTaskList.map((task) => [task.id, task]));
-    for (const task of data.list) {
-      if (!task?.id) continue;
+    for (const raw of data.list.slice(0, 500)) {
+      const task = safeMeshyTask(raw);
+      if (!task) continue;
       merged.set(task.id, mergeMeshyTask(merged.get(task.id), task));
+    }
+    if (merged.size > 5000) {
+      for (const id of [...merged.keys()].slice(0, merged.size - 5000)) merged.delete(id);
     }
     meshyTaskList = [...merged.values()];
   }
@@ -407,9 +437,50 @@ async function meshyJson(path, step, { method = "GET" } = {}) {
 // library card, with the render and the triangle count. The signed GLB is
 // handed out per task, so it is resolved when the user exports.
 function meshyAssetUrl(value) {
-  return typeof value === "string" && /^https:\/\/assets\.meshy\.ai\//i.test(value)
-    ? value
-    : "";
+  if (typeof value !== "string" || value.length > 4096) return "";
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "assets.meshy.ai"
+      && !url.username && !url.password && !url.port ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function safeMeshyPreview(value) {
+  if (typeof value !== "string" || value.length > 4096) return "";
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+// Page-world captures are hints from untrusted JavaScript. Bound their size
+// and retain only fields that the model reader actually consumes.
+function safeMeshyTask(value) {
+  if (!value || !MESHY_ID_RE.test(value.id || "")) return null;
+  const bounded = (input, depth = 0) => {
+    if (depth > 7) return undefined;
+    if (typeof input === "string") return input.slice(0, 4096);
+    if (typeof input === "number") return Number.isFinite(input) ? input : 0;
+    if (Array.isArray(input)) return input.slice(0, 20).map((item) => bounded(item, depth + 1));
+    if (input && typeof input === "object") {
+      const output = {};
+      for (const [key, item] of Object.entries(input).slice(0, 50)) {
+        if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(key) || key === "constructor") continue;
+        output[key] = bounded(item, depth + 1);
+      }
+      return output;
+    }
+    return null;
+  };
+  const task = bounded(value);
+  task.id = value.id.toLowerCase();
+  task.modelUrl = meshyAssetUrl(task.modelUrl);
+  task.previewUrl = safeMeshyPreview(task.previewUrl);
+  return task;
 }
 
 function meshyTaskUrl(task) {
@@ -673,12 +744,15 @@ async function meshyLibrary() {
   let fetched = [];
   let captured = false;
   try {
-    // Pages hold 50 tasks each; stop at the first partial page. The cap keeps
-    // a huge library from turning one scan into a long request chain.
-    for (let page = 1; page <= 10; page += 1) {
+    // Stop on the last or repeated page, including when the API ignores pageNum.
+    let previousPage = "";
+    for (let page = 1; page <= LIBRARY_MAX_PAGES; page += 1) {
       const query = MESHY_TASKS_QUERY.replace("pageNum=1", `pageNum=${page}`);
       const batch = await meshyJson(`/v2/tasks${query}`, "read the library");
       if (!Array.isArray(batch) || !batch.length) break;
+      const pageKey = batch.map((task) => task?.id).join("|");
+      if (pageKey === previousPage) break;
+      previousPage = pageKey;
       fetched.push(...batch);
       if (batch.length < 50) break;
     }

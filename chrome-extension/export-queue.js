@@ -134,6 +134,10 @@ function createExportQueue(options = {}) {
     if (!item || (item.status !== QUEUE_STATES.failed && item.status !== QUEUE_STATES.cancelled)) {
       return false;
     }
+    if (items.some((other) => other !== item && other.key === item.key
+      && (other.status === QUEUE_STATES.waiting || other.status === QUEUE_STATES.processing))) {
+      return false;
+    }
     item.status = QUEUE_STATES.waiting;
     item.detail = "";
     item.updatedAt = Date.now();
@@ -212,19 +216,26 @@ function createExportQueue(options = {}) {
   function restore(stored) {
     if (!Array.isArray(stored)) return;
     items.length = 0;
+    const activeKeys = new Set();
     for (const raw of stored) {
       if (!raw || typeof raw !== "object") continue;
       const status = Object.values(QUEUE_STATES).includes(raw.status)
         ? raw.status
         : QUEUE_STATES.waiting;
+      const key = typeof raw.key === "string" ? raw.key : "";
+      if (!key) continue;
+      const recovered = status === QUEUE_STATES.processing ? QUEUE_STATES.failed : status;
+      const duplicate = recovered === QUEUE_STATES.waiting && activeKeys.has(key);
+      if (recovered === QUEUE_STATES.waiting && !duplicate) activeKeys.add(key);
       items.push({
         id: typeof raw.id === "string" && raw.id ? raw.id : `item-restored-${++counter}`,
-        key: String(raw.key || ""),
+        key,
         name: String(raw.name || "model"),
         platform: raw.platform === "meshy" ? "meshy" : "tripo",
         format: typeof raw.format === "string" ? raw.format : "stl",
-        status: status === QUEUE_STATES.processing ? QUEUE_STATES.failed : status,
-        detail: status === QUEUE_STATES.processing ? QUEUE_INTERRUPTED : String(raw.detail || ""),
+        status: duplicate ? QUEUE_STATES.failed : recovered,
+        detail: duplicate ? "Duplicate active export; retry after the other finishes."
+          : status === QUEUE_STATES.processing ? QUEUE_INTERRUPTED : String(raw.detail || ""),
         savedAs: String(raw.savedAs || ""),
         baseName: typeof raw.baseName === "string" ? raw.baseName : "",
         createdAt: Number(raw.createdAt) || Date.now(),
